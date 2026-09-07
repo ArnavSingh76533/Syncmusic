@@ -10,6 +10,7 @@ interface Props {
   showNavbar?: boolean
   error?: number
   roomId?: string
+  home?: boolean
   children?: ReactNode
 }
 
@@ -18,11 +19,12 @@ const Layout: FC<Props> = ({
   showNavbar = true,
   error,
   roomId,
+  home = false,
   children,
 }) => {
   const [theme, setTheme] = useState("dark")
   useEffect(() => {
-    if (!roomId) return
+    if (!roomId && !home) return
     try {
       const saved = localStorage.getItem("syncmusic-theme")
       setTheme(
@@ -35,7 +37,7 @@ const Layout: FC<Props> = ({
     } catch {
       /* Dark mode remains available when storage is blocked. */
     }
-  }, [roomId])
+  }, [roomId, home])
   const toggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark"
     setTheme(next)
@@ -47,12 +49,12 @@ const Layout: FC<Props> = ({
   }
   return (
     <div
-      className={roomId ? "stream-room" : "flex flex-col min-h-screen"}
-      data-theme={roomId ? theme : undefined}
+      className={roomId || home ? "stream-room" : "flex flex-col min-h-screen"}
+      data-theme={roomId || home ? theme : undefined}
     >
       <Head customMeta={meta} />
       {showNavbar &&
-        (roomId ? (
+        (roomId || home ? (
           <RoomHeader roomId={roomId} theme={theme} toggleTheme={toggleTheme} />
         ) : (
           <header>
@@ -65,12 +67,14 @@ const Layout: FC<Props> = ({
       </noscript>
 
       <main
-        className={roomId ? "room-main" : "relative flex flex-col grow p-2"}
+        className={
+          roomId || home ? "room-main" : "relative flex flex-col grow p-2"
+        }
       >
         {children}
       </main>
 
-      {roomId ? (
+      {roomId || home ? (
         <footer className='room-footer'>
           <span>Made for listening. Better together.</span>
           <span>Syncmusic</span>

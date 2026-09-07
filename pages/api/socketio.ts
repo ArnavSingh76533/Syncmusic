@@ -40,6 +40,8 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
       }
     )
 
+    const emptyRoomTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
     const broadcast = async (room: string | RoomState) => {
       const roomId = typeof room === "string" ? room : room.id
 
@@ -71,6 +73,8 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
         }
 
         const roomId = socket.handshake.query.roomId.toLowerCase()
+        const pendingCleanup = emptyRoomTimers.get(roomId)
+        if (pendingCleanup) { clearTimeout(pendingCleanup); emptyRoomTimers.delete(roomId) }
         const userName = typeof socket.handshake.query.userName === "string" 
           ? socket.handshake.query.userName 
           : undefined
@@ -106,7 +110,7 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
         // Simple chat rate limiting per-socket
         let lastChatAt = 0
 
-        socket.on("disconnect", async () => {
+        socket.on("disconnect", async (reason) => {
           await decUsers()
           log("disconnected")
           const room = await getRoom(roomId)
@@ -116,11 +120,25 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
             (user) => user.socketIds[0] !== socket.id
           )
           if (room.users.length === 0) {
-            await deleteRoom(roomId)
-            log("deleted empty room")
+            if (["ping timeout", "transport close", "transport error"].includes(reason)) {
+              // Mobile browsers can suspend the connection while audio continues.
+              // Give the existing page time to reconnect without losing its queue.
+              await setRoom(roomId, room)
+              const timer = setTimeout(async () => {
+                emptyRoomTimers.delete(roomId)
+                const current = await getRoom(roomId)
+                if (current && current.users.length === 0) await deleteRoom(roomId)
+              }, 120000)
+              timer.unref?.()
+              emptyRoomTimers.set(roomId, timer)
+            } else {
+              await deleteRoom(roomId)
+              log("deleted empty room")
+            }
           } else {
             if (room.ownerId === socket.id) {
               room.ownerId = room.users[0].uid
+              room.ownerName = room.users[0].name
             }
             await broadcast(room)
           }
@@ -147,6 +165,21 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
 
           room.targetState.loop = loop
           await broadcast(updateLastSync(room))
+        })
+
+        // Only the host may anchor the clock after loading or resuming. A stale
+        // callback cannot undo a newer seek, track selection, or pause command.
+        socket.on("syncPlayback", async (snapshot, acknowledge) => {
+          const room = await getRoom(roomId)
+          if (!room || room.ownerId !== socket.id || !snapshot ||
+              room.targetState.paused ||
+              snapshot.src !== room.targetState.playing.src[0]?.src ||
+              snapshot.lastSync !== room.targetState.lastSync ||
+              !Number.isFinite(snapshot.progress) || snapshot.progress < 0) return
+          room.targetState.progress = snapshot.progress
+          room.targetState.lastSync = Math.max(Date.now() / 1000, room.targetState.lastSync + 0.001)
+          if (typeof acknowledge === "function") acknowledge(room.targetState.lastSync)
+          await broadcast(room)
         })
 
         socket.on("setProgress", async (progress) => {

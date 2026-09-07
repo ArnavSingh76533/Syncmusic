@@ -82,35 +82,13 @@ export default function Controls(props: Props) {
     setMusicMode,
     hasMedia,
   } = props
-  const [visible, setVisible] = useState(true)
   const [settings, setSettings] = useState(false)
   const [draft, setDraft] = useState<number | null>(null)
-  const [focused, setFocused] = useState(false)
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const seekValue = useRef<number | null>(null)
   const panel = useRef<HTMLDivElement>(null)
   const settingsButton = useRef<HTMLButtonElement>(null)
   const ended = hasMedia && duration > 0 && paused && progress >= duration - 0.5
-  const show =
-    visible ||
-    paused ||
-    musicMode ||
-    settings ||
-    focused ||
-    draft !== null ||
-    !hasMedia
   const shownProgress = Math.max(0, Math.min(duration || 0, draft ?? progress))
-  const wake = () => {
-    setVisible(true)
-    if (timer.current) clearTimeout(timer.current)
-    timer.current = setTimeout(() => setVisible(false), 3200)
-  }
-  useEffect(() => {
-    wake()
-    return () => {
-      if (timer.current) clearTimeout(timer.current)
-    }
-  }, [])
   useEffect(() => {
     if (!settings) return
     const dismiss = (event: PointerEvent) => {
@@ -158,7 +136,6 @@ export default function Controls(props: Props) {
       disabled={disabled}
       onClick={() => {
         action()
-        wake()
       }}
     >
       {icon}
@@ -167,21 +144,10 @@ export default function Controls(props: Props) {
 
   return (
     <div
-      className={`player-controls ${
-        show ? "controls-visible" : "controls-hidden"
-      }`}
+      className='player-controls controls-visible'
       tabIndex={0}
       role='group'
       aria-label='Media player. Space to play, arrow keys to seek, M to mute, F for fullscreen.'
-      onPointerMove={wake}
-      onPointerDown={wake}
-      onFocusCapture={() => setFocused(true)}
-      onBlurCapture={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) {
-          setFocused(false)
-          wake()
-        }
-      }}
       onKeyDown={(event) => {
         if (event.key === "Escape" && settings) {
           event.stopPropagation()
@@ -193,7 +159,6 @@ export default function Controls(props: Props) {
         const key = event.key.toLowerCase()
         if ([" ", "k", "m", "f", "arrowleft", "arrowright"].includes(key)) {
           event.preventDefault()
-          wake()
           if (key === " " || key === "k") togglePlay()
           if (key === "m") setMuted(!muted)
           if (key === "f") toggleFullscreen()
@@ -204,40 +169,17 @@ export default function Controls(props: Props) {
         }
       }}
     >
-      <div className='player-topline'>
-        <span className='player-mode'>
-          <AudioLines size={15} />
-          {musicMode ? "AUDIO SESSION" : "WATCH TOGETHER"}
-        </span>
-        <span className='player-top-hint'>
-          {canControl ? "Your room. Your soundtrack." : "Enjoy the session"}
-        </span>
-      </div>
-      <div className='player-center' onDoubleClick={toggleFullscreen}>
-        {!musicMode &&
-          hasMedia &&
-          iconButton(
-            canControl
-              ? ended
-                ? "Replay"
-                : paused
-                  ? "Play"
-                  : "Pause"
-              : "The host controls playback",
-            togglePlay,
-            ended ? (
-              <RotateCcw />
-            ) : paused ? (
-              <Play fill='currentColor' />
-            ) : (
-              <Pause fill='currentColor' />
-            ),
-            !canControl,
-            false,
-            "player-center-play"
-          )}
-      </div>
       <div className='player-control-deck'>
+        <div className='player-deck-heading'>
+          <span className='player-mode'>
+            <AudioLines size={15} />
+            {musicMode ? "AUDIO SESSION" : "WATCH TOGETHER"}
+          </span>
+          <span className='player-time'>
+            {secondsToTime(shownProgress)}
+            <span> / {secondsToTime(duration)}</span>
+          </span>
+        </div>
         <div className='player-timeline'>
           <input
             type='range'
@@ -271,10 +213,13 @@ export default function Controls(props: Props) {
                 seekValue.current = value
                 setDraft(value)
               } else setProgress(value)
-              wake()
             }}
             onPointerUp={finishSeek}
-            onPointerCancel={finishSeek}
+            onPointerCancel={() => {
+              seekValue.current = null
+              setDraft(null)
+              setSeeking(false)
+            }}
             onLostPointerCapture={finishSeek}
             onBlur={finishSeek}
           />
@@ -335,14 +280,9 @@ export default function Controls(props: Props) {
                 onChange={(event) => {
                   setVolume(Number(event.target.value))
                   setMuted(false)
-                  wake()
                 }}
               />
             </div>
-            <span className='player-time'>
-              {secondsToTime(shownProgress)}
-              <span> / {secondsToTime(duration)}</span>
-            </span>
           </div>
           <div className='transport-secondary'>
             {iconButton(
@@ -380,7 +320,6 @@ export default function Controls(props: Props) {
                 aria-controls='playback-settings'
                 onClick={() => {
                   setSettings(!settings)
-                  wake()
                 }}
               >
                 <Settings2 />

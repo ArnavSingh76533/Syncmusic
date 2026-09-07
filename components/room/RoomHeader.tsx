@@ -9,14 +9,16 @@ export default function RoomHeader({
   theme,
   toggleTheme,
 }: {
-  roomId: string
+  roomId?: string
   theme: string
   toggleTheme: () => void
 }) {
   const [copied, setCopied] = useState(false)
   const [shareUrl, setShareUrl] = useState("")
   const invite = async () => {
-    const url = `${window.location.origin}/room/${encodeURIComponent(roomId)}`
+    const url = `${window.location.origin}/room/${encodeURIComponent(
+      roomId || ""
+    )}`
     setShareUrl(url)
     try {
       await navigator.clipboard.writeText(url)
@@ -36,10 +38,12 @@ export default function RoomHeader({
           <span className='brand-period'>.</span>
         </span>
       </Link>
-      <div className='room-nav-context'>
-        <span className='nav-divider' />
-        Listening room <span className='room-code'>{roomId}</span>
-      </div>
+      {roomId && (
+        <div className='room-nav-context'>
+          <span className='nav-divider' />
+          Listening room <span className='room-code'>{roomId}</span>
+        </div>
+      )}
       <div className='room-header-actions'>
         <Button
           variant='ghost'
@@ -51,10 +55,16 @@ export default function RoomHeader({
         >
           {theme === "dark" ? <Sun /> : <Moon />}
         </Button>
-        <Button className='room-primary' onClick={invite}>
-          {copied ? <Check /> : <Copy />}
-          <span>{copied ? "Link copied" : "Invite friends"}</span>
-        </Button>
+        {roomId ? (
+          <Button className='room-primary' onClick={invite}>
+            {copied ? <Check /> : <Copy />}
+            <span>{copied ? "Link copied" : "Invite friends"}</span>
+          </Button>
+        ) : (
+          <Link className='room-secondary home-browse' href='#public-rooms'>
+            Explore rooms
+          </Link>
+        )}
       </div>
       {shareUrl && (
         <div className='room-share' role='status'>

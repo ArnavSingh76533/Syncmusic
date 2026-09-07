@@ -73,7 +73,7 @@ export const wipeCache = async (): Promise<"OK"> => {
 export const getPublicRooms = async (): Promise<RoomState[]> => {
   const publicRooms: RoomState[] = []
   for (const [_, room] of rooms) {
-    if (room.isPublic) {
+    if (room.isPublic && room.users.length > 0) {
       publicRooms.push(room)
     }
   }

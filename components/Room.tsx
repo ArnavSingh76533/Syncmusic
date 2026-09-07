@@ -107,6 +107,32 @@ export default function Room({ id }: { id: string }) {
         <div className='room-grid'>
           <section className='room-stage' aria-label='Stream player'>
             <Player roomId={id} socket={socket} />
+            <nav className='room-shortcuts' aria-label='Jump to room activity'>
+              {[
+                { id: "search", label: "Discover", icon: Search },
+                { id: "queue", label: "Queue", icon: ListMusic },
+                { id: "chat", label: "Chat", icon: MessageCircle },
+              ].map(({ id: panel, label, icon: Icon }) => (
+                <Button
+                  key={panel}
+                  variant='ghost'
+                  className='room-secondary'
+                  onClick={() => {
+                    setTab(panel)
+                    document
+                      .getElementById(`tab-${panel}`)
+                      ?.focus({ preventScroll: true })
+                    document
+                      .getElementById("room-activity")
+                      ?.scrollIntoView({ block: "start" })
+                  }}
+                >
+                  <Icon size={17} />
+                  {label}
+                  {panel === "queue" && count > 0 ? ` · ${count}` : ""}
+                </Button>
+              ))}
+            </nav>
             <div className='room-source-bar'>
               <div className='source-label'>PLAY SOMETHING</div>
               <InputUrl
@@ -142,7 +168,11 @@ export default function Room({ id }: { id: string }) {
               <UserList socket={socket} />
             </section>
           </section>
-          <aside className='room-sidebar' aria-label='Room activity'>
+          <aside
+            id='room-activity'
+            className='room-sidebar'
+            aria-label='Room activity'
+          >
             <div className='room-tabs' role='tablist' aria-label='Room panels'>
               {[
                 { id: "queue", label: "Queue", icon: ListMusic },

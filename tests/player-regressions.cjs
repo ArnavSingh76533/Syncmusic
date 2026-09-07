@@ -7,6 +7,7 @@ const http = require("node:http")
 const { once } = require("node:events")
 const { io } = require("socket.io-client")
 const { reorderPlaylist, youtubeId, mediaTitle, isImageSource } = require("../lib/media.ts")
+const { playbackCorrection, bindPlaybackLifecycle } = require("../lib/playback.ts")
 const { default: socketHandler } = require("../pages/api/socketio.ts")
 
 const track = (id) => ({ title: `Track ${id}`, src: [{ src: `https://example.com/${id}.mp4`, resolution: "" }], sub: [] })
@@ -32,6 +33,35 @@ function unitTests() {
   assert.equal(youtubeId("https://youtu.be/invalid"), null)
   assert.equal(isImageSource("https://example.com/welcome.webp?width=500"), true)
   assert.equal(mediaTitle({ src: [], sub: [] }), "Your next favorite starts here")
+  const state = { paused: false, progress: 0, lastSync: 100, playbackRate: 1 }
+  const correction = { target: state, actual: 1, duration: 180, serverOffset: 0, host: true, appliedRevision: 100, hidden: false, buffering: false, now: 125 }
+  assert.equal(playbackCorrection(correction), null, "a host must not skip 25 seconds because the provider took time to load")
+  assert.equal(playbackCorrection({ ...correction, appliedRevision: null }), 0, "initial host playback starts at the requested time")
+  assert.equal(playbackCorrection({ ...correction, host: false }), 25, "listeners still synchronize to the shared clock")
+  assert.equal(playbackCorrection({ ...correction, host: false, hidden: true }), null, "background playback must not be interrupted by corrective seeks")
+  assert.equal(playbackCorrection({ ...correction, host: false, buffering: true }), null, "buffering must not trigger repeated corrective seeks")
+  assert.equal(playbackCorrection({ ...correction, target: { ...state, lastSync: 125, progress: 60 } }), 60, "explicit host seeks are still applied")
+  assert.equal(playbackCorrection({ ...correction, host: false, target: { ...state, paused: true, progress: 15 } }), 15, "paused rooms do not extrapolate their clock")
+  assert.equal(playbackCorrection({ ...correction, host: false, duration: 20 }), 20, "corrections cannot seek beyond the media duration")
+  const page = new EventTarget(), windowEvents = new EventTarget()
+  page.visibilityState = "hidden"
+  let resumes = 0, refreshes = 0, shouldPlay = true
+  const unbind = bindPlaybackLifecycle(page, windowEvents, { resume: () => resumes++, refresh: () => refreshes++, shouldPlay: () => shouldPlay })
+  page.dispatchEvent(new Event("visibilitychange"))
+  assert.equal(resumes, 1, "a background transition preserves play intent")
+  assert.equal(refreshes, 0, "hiding the page must not reset or fetch the player")
+  page.visibilityState = "visible"
+  page.dispatchEvent(new Event("visibilitychange"))
+  assert.equal(resumes, 2)
+  assert.equal(refreshes, 1)
+  shouldPlay = false
+  windowEvents.dispatchEvent(new Event("pageshow"))
+  assert.equal(resumes, 2, "returning to a paused room must not restart playback")
+  assert.equal(refreshes, 2)
+  unbind()
+  windowEvents.dispatchEvent(new Event("online"))
+  assert.equal(refreshes, 2, "unmounted players must release lifecycle handlers")
+
 }
 
 function update(socket, action, predicate = () => true) {
@@ -69,6 +99,37 @@ async function integrationTests() {
     room = await update(host, () => host.emit("playItemFromPlaylist", 2))
     assert.equal(room.targetState.paused, false, "selecting a queued track must start playback")
     assert.equal(room.targetState.playing.title, "Track 2")
+    const source = room.targetState.playing.src[0].src
+    let revision = room.targetState.lastSync
+    let acknowledged = null
+    room = await update(host, () => host.emit("syncPlayback", { src: source, lastSync: revision, progress: 1 }, (value) => { acknowledged = value }))
+    assert.equal(room.targetState.progress, 1, "the host's real playhead replaces elapsed loading time")
+    assert.equal(acknowledged, room.targetState.lastSync, "clock acknowledgements arrive before room updates to prevent host seek-back")
+    assert.ok(room.targetState.lastSync > revision)
+    const stable = JSON.stringify(room.targetState)
+    guest.emit("syncPlayback", { src: source, lastSync: room.targetState.lastSync, progress: 99 })
+    room = await update(guest, () => guest.emit("fetch"))
+    assert.equal(JSON.stringify(room.targetState), stable, "listeners cannot replace the host clock")
+    for (const snapshot of [
+      { src: source, lastSync: revision, progress: 80 },
+      { src: "https://example.com/previous.mp4", lastSync: room.targetState.lastSync, progress: 80 },
+      { src: source, lastSync: room.targetState.lastSync, progress: -1 },
+    ]) {
+      host.emit("syncPlayback", snapshot)
+      room = await update(host, () => host.emit("fetch"))
+      assert.equal(JSON.stringify(room.targetState), stable, "stale or invalid recovery events cannot change playback")
+    }
+    room = await update(host, () => host.emit("seek", 40))
+    host.emit("syncPlayback", { src: source, lastSync: acknowledged, progress: 1 })
+    room = await update(host, () => host.emit("fetch"))
+    assert.equal(room.targetState.progress, 40, "a late play event cannot undo a newer seek")
+    room = await update(host, () => host.emit("setPaused", true))
+    const paused = JSON.stringify(room.targetState)
+    host.emit("syncPlayback", { src: source, lastSync: room.targetState.lastSync, progress: 70 })
+    room = await update(host, () => host.emit("fetch"))
+    assert.equal(JSON.stringify(room.targetState), paused, "background recovery must respect an explicit pause")
+    room = await update(host, () => host.emit("setPaused", false))
+
 
     guest.emit("playEnded")
     room = await update(guest, () => guest.emit("fetch"))
@@ -113,6 +174,20 @@ async function integrationTests() {
     const newOwner = update(guest, () => host.disconnect(), (state) => state.ownerId === guest.id)
     room = await newOwner
     assert.equal(room.users.length, 1, "ownership must transfer after the host leaves")
+    const preserved = JSON.stringify(room.targetState)
+    // Simulate an app switch dropping the transport, not an intentional Leave.
+    const reconnected = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Reconnect timed out")), 5000)
+      guest.once("connect", () => { clearTimeout(timeout); resolve() })
+    })
+    guest.io.engine.close()
+    await reconnected
+    room = await update(guest, () => guest.emit("fetch"))
+    assert.equal(JSON.stringify(room.targetState), preserved, "a temporary background disconnect must preserve the track and queue")
+    assert.equal(room.ownerId, guest.id, "the returning solo listener regains host controls")
+    assert.equal(room.users.length, 1)
+    assert.equal(room.chatLog.at(-1).text, "Hello from the listening room", "reconnection preserves chat as well as playback")
+
   } finally {
     sockets.forEach((socket) => socket.disconnect())
     if (server.io) await new Promise((resolve) => server.io.close(resolve))
@@ -125,6 +200,6 @@ async function main() {
   const log = console.log
   console.log = () => {}
   try { await integrationTests() } finally { console.log = log }
-  console.log("PASS: 80 queue reorder combinations, media parsing, and two-client playback/queue/chat/ownership regressions.")
+  console.log("PASS: 80 queue reorders; background lifecycle and seek timing; two-client clock, reconnect, playback, queue, chat and ownership regressions.")
 }
 main().catch((error) => { console.error(error); process.exitCode = 1 })

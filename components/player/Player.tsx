@@ -14,10 +14,14 @@ import {
   Loader2,
   Radio,
   Volume2,
+  VolumeX,
+  Play,
+  Pause,
+  ChevronUp,
 } from "lucide-react"
 import { TypedSocket, playItemFromPlaylist } from "../../lib/socket"
 import { MediaOption, RoomState, Subtitle, TargetState } from "../../lib/types"
-import { getTargetTime, isSync } from "../../lib/utils"
+import { bindPlaybackLifecycle, playbackCorrection } from "../../lib/playback"
 import {
   mediaArtwork,
   mediaProvider,
@@ -76,6 +80,7 @@ export default function Player({
   const [reload, setReload] = useState(0)
   const [pip, setPip] = useState(false)
   const [theater, setTheater] = useState(false)
+  const [showMini, setShowMini] = useState(false)
   const player = useRef<ReactPlayer>(null)
   const container = useRef<HTMLDivElement>(null)
   const seeking = useRef(false)
@@ -84,6 +89,9 @@ export default function Player({
   }, [])
   const delta = useRef<number | null>(null)
   const reportedAt = useRef(0)
+  const anchoredAt = useRef(0)
+  const appliedRevision = useRef<number | null>(null)
+  const blockedCleanup = useRef<(() => void) | null>(null)
   const recovery = useRef<AbortController | null>(null)
   const triedFallback = useRef(false)
   const fullscreenHandle = useFullScreenHandle()
@@ -132,6 +140,7 @@ export default function Player({
     recovery.current?.abort()
     recovery.current = null
     triedFallback.current = false
+    appliedRevision.current = null
     setCurrentSrc({
       src: canonicalSrc,
       resolution: targetRef.current.playing.src[0]?.resolution || "",
@@ -156,42 +165,206 @@ export default function Player({
 
   useEffect(() => {
     if (!ready || !player.current || seeking.current || imageSource) return
-    const clock = target.lastSync - (delta.current || 0)
-    const actual = player.current.getCurrentTime()
-    if (
-      Number.isFinite(actual) &&
-      !isSync(
-        actual,
-        target.progress,
-        clock,
-        target.paused,
-        target.playbackRate
-      )
-    ) {
-      const time = Math.max(
-        0,
-        getTargetTime(
-          target.progress,
-          clock,
-          target.paused,
-          target.playbackRate
+    const time = playbackCorrection({
+      target,
+      actual: player.current.getCurrentTime(),
+      duration,
+      serverOffset: delta.current || 0,
+      host: owner,
+      appliedRevision: appliedRevision.current,
+      hidden: document.visibilityState === "hidden",
+      buffering,
+    })
+    if (document.visibilityState === "hidden" || buffering) return
+    appliedRevision.current = target.lastSync
+    if (time !== null) player.current.seekTo(time, "seconds")
+  }, [ready, progress, target, duration, imageSource, owner, buffering])
+
+  const resumePlayback = useCallback(() => {
+    if (targetRef.current.paused || seeking.current) return
+    const internal = player.current?.getInternalPlayer()
+    try {
+      if (typeof internal?.play === "function") {
+        internal.play()?.catch?.(() => setAutoplayBlocked(true))
+      } else internal?.playVideo?.()
+    } catch {
+      setAutoplayBlocked(true)
+    }
+  }, [])
+
+  useEffect(
+    () =>
+      bindPlaybackLifecycle(document, window, {
+        shouldPlay: () => !targetRef.current.paused,
+        resume: resumePlayback,
+        refresh: () => {
+          if (socket.connected) socket.emit("fetch")
+          else socket.connect()
+        },
+      }),
+    [socket, resumePlayback]
+  )
+
+  useEffect(() => {
+    if (!container.current || typeof IntersectionObserver === "undefined")
+      return
+    const observer = new IntersectionObserver(([entry]) =>
+      setShowMini(!entry.isIntersecting)
+    )
+    observer.observe(container.current)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => () => blockedCleanup.current?.(), [])
+
+  // Lock-screen and headset controls use the same room commands as the UI.
+  useEffect(() => {
+    if (!("mediaSession" in navigator) || imageSource || !canonicalSrc) return
+    const session = navigator.mediaSession
+    if (typeof MediaMetadata !== "undefined")
+      session.metadata = new MediaMetadata({
+        title,
+        artist: "Syncmusic",
+        album: `Room ${roomId}`,
+        artwork: artwork ? [{ src: artwork }] : [],
+      })
+    const pause = (value: boolean) => {
+      if (!ownerRef.current || !socket.connected) return
+      targetRef.current = { ...targetRef.current, paused: value }
+      socket.emit("setPaused", value)
+      if (value) {
+        const internal = player.current?.getInternalPlayer()
+        internal?.pause?.()
+        internal?.pauseVideo?.()
+      } else resumePlayback()
+    }
+    const seek = (position: number) => {
+      if (!ownerRef.current || !socket.connected) return
+      const length = player.current?.getDuration() || 0
+      if (!(length > 0)) return
+      const time = Math.max(0, Math.min(length, position))
+      socket.emit("seek", time)
+      player.current?.seekTo(time, "seconds")
+    }
+    const actions: Partial<
+      Record<MediaSessionAction, MediaSessionActionHandler>
+    > = {
+      play: () => pause(false),
+      pause: () => pause(true),
+      seekto: (details) => {
+        if (details.seekTime !== undefined) seek(details.seekTime)
+      },
+      seekbackward: (details) =>
+        seek(
+          (player.current?.getCurrentTime() || 0) - (details.seekOffset || 10)
+        ),
+      seekforward: (details) =>
+        seek(
+          (player.current?.getCurrentTime() || 0) + (details.seekOffset || 10)
+        ),
+      previoustrack: () => {
+        if (ownerRef.current && socket.connected)
+          playItemFromPlaylist(
+            socket,
+            targetRef.current.playlist,
+            targetRef.current.playlist.currentIndex - 1
+          )
+      },
+      nexttrack: () => {
+        if (ownerRef.current && socket.connected)
+          playItemFromPlaylist(
+            socket,
+            targetRef.current.playlist,
+            targetRef.current.playlist.currentIndex + 1
+          )
+      },
+    }
+    for (const [action, handler] of Object.entries(actions)) {
+      try {
+        session.setActionHandler(
+          action as MediaSessionAction,
+          owner ? handler : null
         )
-      )
-      player.current.seekTo(
-        duration > 0 ? Math.min(time, duration) : time,
-        "seconds"
-      )
+      } catch {
+        /* unsupported action */
+      }
+    }
+    return () => {
+      for (const action of Object.keys(actions)) {
+        try {
+          session.setActionHandler(action as MediaSessionAction, null)
+        } catch {
+          /* unsupported action */
+        }
+      }
+      session.metadata = null
+      session.playbackState = "none"
     }
   }, [
-    ready,
-    progress,
-    target.lastSync,
-    target.progress,
+    canonicalSrc,
+    title,
+    artwork,
+    roomId,
+    imageSource,
+    socket,
+    owner,
+    resumePlayback,
+  ])
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator) || imageSource || !canonicalSrc) return
+    navigator.mediaSession.playbackState = target.paused ? "paused" : "playing"
+    try {
+      if (duration > 0)
+        navigator.mediaSession.setPositionState?.({
+          duration,
+          playbackRate: target.playbackRate,
+          position: Math.max(0, Math.min(duration, progress)),
+        })
+      else navigator.mediaSession.setPositionState?.()
+    } catch {
+      /* position reporting is optional */
+    }
+  }, [
     target.paused,
     target.playbackRate,
+    progress,
     duration,
+    canonicalSrc,
     imageSource,
   ])
+
+  const anchorPlayback = () => {
+    const actual = player.current?.getCurrentTime()
+    // A track update can arrive before ReactPlayer has loaded its new URL.
+    if (
+      !triedFallback.current &&
+      !targetRef.current.playing.src.some(
+        (source) => source.src === currentSrc.src
+      )
+    )
+      return
+    if (
+      !ownerRef.current ||
+      !socket.connected ||
+      targetRef.current.paused ||
+      seeking.current ||
+      !Number.isFinite(actual)
+    )
+      return
+    anchoredAt.current = Date.now()
+    socket.emit(
+      "syncPlayback",
+      {
+        src: canonicalSrc,
+        lastSync: targetRef.current.lastSync,
+        progress: actual!,
+      },
+      (revision) => {
+        appliedRevision.current = revision
+      }
+    )
+  }
 
   useEffect(() => {
     if (!theater) return
@@ -254,12 +427,18 @@ export default function Player({
   const resumeAudio = () => {
     setMuted(false)
     setAutoplayBlocked(false)
+    // Apply audio within the gesture, before React's asynchronous render.
     const internal = player.current?.getInternalPlayer()
-    if (!targetRef.current.paused && internal) {
-      if (typeof internal.play === "function")
-        internal.play()?.catch?.(() => setAutoplayBlocked(true))
-      else if (typeof internal.playVideo === "function") internal.playVideo()
-    }
+    if (internal instanceof HTMLMediaElement) internal.muted = false
+    else internal?.unMute?.()
+    resumePlayback()
+  }
+
+  const changePaused = (value: boolean) => {
+    if (!canControl) return
+    targetRef.current = { ...targetRef.current, paused: value }
+    socket.emit("setPaused", value)
+    if (!value) resumeAudio()
   }
 
   const onPlaybackError = async (event: unknown) => {
@@ -320,139 +499,148 @@ export default function Player({
         handle={fullscreenHandle}
         className={`player-stage ${fullscreen ? "player-expanded" : ""} ${
           theater ? "player-theater" : ""
-        } ${musicMode ? "player-music" : ""}`}
+        } ${musicMode ? "player-music" : ""} ${
+          imageSource || !currentSrc.src ? "player-welcome" : ""
+        }`}
       >
-        <div className='player-media'>
-          {imageSource ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              className='welcome-image'
-              src={currentSrc.src}
-              alt='Room welcome screen'
-              onError={() =>
-                setError(
-                  "The welcome image couldn’t load. Paste a media link below to start listening."
-                )
-              }
-            />
-          ) : currentSrc.src ? (
-            <ReactPlayer
-              key={reload}
-              ref={player}
-              width='100%'
-              height='100%'
-              style={{ visibility: musicMode ? "hidden" : "visible" }}
-              url={currentSrc.src}
-              playing={!target.paused}
-              controls={false}
-              playbackRate={target.playbackRate}
-              volume={volume}
-              muted={muted}
-              playsinline
-              config={{
-                youtube: {
-                  playerVars: {
-                    disablekb: 1,
-                    origin:
-                      typeof window !== "undefined"
-                        ? window.location.origin
-                        : undefined,
-                    rel: 0,
+        <div className='player-viewport'>
+          <div className='player-media'>
+            {!imageSource && currentSrc.src ? (
+              <ReactPlayer
+                key={reload}
+                ref={player}
+                width='100%'
+                height='100%'
+                style={{ visibility: musicMode ? "hidden" : "visible" }}
+                url={currentSrc.src}
+                playing={!target.paused}
+                controls={false}
+                playbackRate={target.playbackRate}
+                volume={volume}
+                muted={muted}
+                playsinline
+                config={{
+                  youtube: {
+                    playerVars: {
+                      disablekb: 1,
+                      autoplay: 1,
+                      origin:
+                        typeof window !== "undefined"
+                          ? window.location.origin
+                          : undefined,
+                      rel: 0,
+                    },
                   },
-                },
-                file: {
-                  hlsVersion: "1.1.3",
-                  dashVersion: "4.2.1",
-                  flvVersion: "1.6.2",
-                  attributes: {
-                    crossOrigin: currentSub.src ? "anonymous" : undefined,
+                  file: {
+                    hlsVersion: "1.1.3",
+                    dashVersion: "4.2.1",
+                    flvVersion: "1.6.2",
+                    attributes: {
+                      crossOrigin: currentSub.src ? "anonymous" : undefined,
+                    },
+                    tracks: currentSub.src
+                      ? [
+                          {
+                            kind: "subtitles",
+                            src: currentSub.src,
+                            srcLang: currentSub.lang,
+                            label: currentSub.lang,
+                            default: true,
+                          },
+                        ]
+                      : [],
                   },
-                  tracks: currentSub.src
-                    ? [
-                        {
-                          kind: "subtitles",
-                          src: currentSub.src,
-                          srcLang: currentSub.lang,
-                          label: currentSub.lang,
-                          default: true,
-                        },
-                      ]
-                    : [],
-                },
-              }}
-              onReady={() => {
-                setReady(true)
-                setBuffering(false)
-                setError(null)
-                socket.emit("fetch")
-              }}
-              onPlay={() => {
-                setBuffering(false)
-                setAutoplayBlocked(false)
-                const internal = player.current?.getInternalPlayer()
-                if (targetRef.current.paused) {
-                  internal?.pause?.()
-                  internal?.pauseVideo?.()
+                }}
+                onReady={() => {
+                  setReady(true)
+                  setBuffering(false)
+                  setError(null)
+                  blockedCleanup.current?.()
+                  const internal = player.current?.getInternalPlayer()
+                  const blocked = () => {
+                    setAutoplayBlocked(true)
+                    setBuffering(false)
+                  }
+                  internal?.addEventListener?.("onAutoplayBlocked", blocked)
+                  blockedCleanup.current = () =>
+                    internal?.removeEventListener?.(
+                      "onAutoplayBlocked",
+                      blocked
+                    )
+                  socket.emit("fetch")
+                }}
+                onPlay={() => {
+                  setBuffering(false)
+                  setAutoplayBlocked(false)
+                  const internal = player.current?.getInternalPlayer()
+                  if (targetRef.current.paused) {
+                    internal?.pause?.()
+                    internal?.pauseVideo?.()
+                  } else anchorPlayback()
+                }}
+                onPause={resumePlayback}
+                onBuffer={() => setBuffering(true)}
+                onBufferEnd={() => {
+                  setBuffering(false)
+                  anchorPlayback()
+                }}
+                onEnded={() => {
+                  if (ownerRef.current) socket.emit("playEnded")
+                }}
+                onError={onPlaybackError}
+                onProgress={({ playedSeconds }) => {
+                  if (!Number.isFinite(playedSeconds) || seeking.current) return
+                  setReady(true)
+                  setProgress(playedSeconds)
+                  if (Date.now() - anchoredAt.current > 3000) anchorPlayback()
+                  if (
+                    socket.connected &&
+                    Date.now() - reportedAt.current > 900
+                  ) {
+                    reportedAt.current = Date.now()
+                    socket.emit("setProgress", playedSeconds)
+                  }
+                }}
+                onDuration={(value) =>
+                  setDuration(Number.isFinite(value) ? Math.max(0, value) : 0)
                 }
-              }}
-              onPause={() => {
-                // Keep local provider pauses from silently drifting away from the room.
-                if (targetRef.current.paused || seeking.current) return
-                const internal = player.current?.getInternalPlayer()
-                if (typeof internal?.play === "function")
-                  internal.play()?.catch?.(() => setAutoplayBlocked(true))
-                else internal?.playVideo?.()
-              }}
-              onBuffer={() => setBuffering(true)}
-              onBufferEnd={() => setBuffering(false)}
-              onEnded={() => {
-                if (ownerRef.current) socket.emit("playEnded")
-              }}
-              onError={onPlaybackError}
-              onProgress={({ playedSeconds }) => {
-                if (!Number.isFinite(playedSeconds) || seeking.current) return
-                setReady(true)
-                setProgress(playedSeconds)
-                if (socket.connected && Date.now() - reportedAt.current > 900) {
-                  reportedAt.current = Date.now()
-                  socket.emit("setProgress", playedSeconds)
-                }
-              }}
-              onDuration={(value) =>
-                setDuration(Number.isFinite(value) ? Math.max(0, value) : 0)
-              }
-              onEnablePIP={() => setPip(true)}
-              onDisablePIP={() => setPip(false)}
-            />
-          ) : null}
-        </div>
-        {(musicMode || !currentSrc.src) && (
-          <div className='music-canvas'>
-            <div className='music-artwork'>
-              {artwork ? (
-                <Artwork src={artwork} />
-              ) : (
-                <Headphones size={72} strokeWidth={1} />
-              )}
-              <span className='music-art-badge'>
-                <AudioLines size={18} />
-              </span>
-            </div>
-            <div className='music-caption'>
-              <span className='player-eyebrow'>
-                {currentSrc.src ? "JUST YOU & THE MUSIC" : "READY WHEN YOU ARE"}
-              </span>
-              <h2>
-                {currentSrc.src ? title : "A little closer, through music."}
-              </h2>
-              <p>
-                {currentSrc.src
-                  ? mediaProvider(currentSrc.src)
-                  : "Add a track. Invite your people. Press play."}
-              </p>
-            </div>
+                onEnablePIP={() => setPip(true)}
+                onDisablePIP={() => setPip(false)}
+              />
+            ) : null}
           </div>
-        )}
+          {(musicMode || !currentSrc.src || imageSource) && (
+            <div className='music-canvas'>
+              <div className='music-artwork'>
+                {artwork ? (
+                  <Artwork src={artwork} />
+                ) : (
+                  <Headphones size={72} strokeWidth={1} />
+                )}
+                <span className='music-art-badge'>
+                  <AudioLines size={18} />
+                </span>
+              </div>
+              <div className='music-caption'>
+                <span className='player-eyebrow'>
+                  {currentSrc.src && !imageSource
+                    ? "JUST YOU & THE MUSIC"
+                    : "READY WHEN YOU ARE"}
+                </span>
+                <h2>
+                  {currentSrc.src && !imageSource
+                    ? title
+                    : "A little closer, through music."}
+                </h2>
+                <p>
+                  {currentSrc.src && !imageSource
+                    ? mediaProvider(currentSrc.src)
+                    : "Add a track. Invite your people. Press play."}
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
         <Controls
           roomId={roomId}
           playing={target.playing}
@@ -462,16 +650,14 @@ export default function Player({
           currentSub={currentSub}
           setCurrentSub={setCurrentSub}
           paused={target.paused}
-          setPaused={(value) => {
-            if (canControl) {
-              if (!value) resumeAudio()
-              socket.emit("setPaused", value)
-            }
-          }}
+          setPaused={changePaused}
           volume={volume}
           setVolume={setVolume}
           muted={muted}
-          setMuted={setMuted}
+          setMuted={(value) => {
+            if (value) setMuted(true)
+            else resumeAudio()
+          }}
           progress={progress}
           duration={duration}
           setProgress={(value) => {
@@ -557,6 +743,56 @@ export default function Player({
           </div>
         )}
       </FullScreenContainer>
+      {showMini &&
+        !fullHeight &&
+        !fullscreen &&
+        canonicalSrc &&
+        !imageSource && (
+          <div
+            className='sticky-mini'
+            role='region'
+            aria-label='Quick playback controls'
+          >
+            <button
+              className='mini-track'
+              onClick={() =>
+                container.current?.scrollIntoView({ block: "start" })
+              }
+              aria-label={`Back to player: ${title}`}
+            >
+              <span className='now-art'>
+                {artwork ? <Artwork src={artwork} /> : <AudioLines />}
+              </span>
+              <span>
+                <small>NOW PLAYING</small>
+                <strong>{title}</strong>
+              </span>
+              <ChevronUp size={18} />
+            </button>
+            <Button
+              className='player-button'
+              variant='ghost'
+              size='icon'
+              aria-label={muted ? "Enable sound" : "Mute"}
+              onClick={() => (muted ? resumeAudio() : setMuted(true))}
+            >
+              {muted ? <VolumeX /> : <Volume2 />}
+            </Button>
+            <Button
+              className='player-button transport-play'
+              size='icon'
+              disabled={!canControl}
+              aria-label={target.paused ? "Play" : "Pause"}
+              onClick={() => changePaused(!target.paused)}
+            >
+              {target.paused ? (
+                <Play fill='currentColor' />
+              ) : (
+                <Pause fill='currentColor' />
+              )}
+            </Button>
+          </div>
+        )}
       {!fullHeight && (
         <div className='now-playing'>
           <div className='now-art'>

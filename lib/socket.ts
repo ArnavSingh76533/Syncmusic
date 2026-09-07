@@ -35,6 +35,7 @@ export interface ClientToServerEvents {
   setPaused: (paused: boolean) => void
   setLoop: (loop: boolean) => void
   setProgress: (progress: number) => void
+  syncPlayback: (snapshot: { src: string; lastSync: number; progress: number }, acknowledge?: (revision: number) => void) => void
   setPlaybackRate: (playbackRate: number) => void
   setMusicMode: (musicMode: boolean) => void
   seek: (progress: number) => void
