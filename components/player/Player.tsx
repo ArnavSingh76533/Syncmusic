@@ -1,482 +1,602 @@
 "use client"
-import React, { FC, useEffect, useRef, useState } from "react"
-import { type Socket } from "socket.io-client"
-import {
-  ClientToServerEvents,
-  playItemFromPlaylist,
-  ServerToClientEvents,
-} from "../../lib/socket"
-import Controls from "./Controls"
+import React, { useCallback, useEffect, useRef, useState } from "react"
+import ReactPlayer from "react-player"
+import Image from "next/image"
 import {
   FullScreen,
   FullScreenProps,
   useFullScreenHandle,
 } from "react-full-screen"
-import ReactPlayer from "react-player"
 import {
-  MediaElement,
-  MediaOption,
-  Playlist,
-  RoomState,
-  Subtitle,
-} from "../../lib/types"
-import ConnectingAlert from "../alert/ConnectingAlert"
+  AlertCircle,
+  AudioLines,
+  Headphones,
+  Loader2,
+  Radio,
+  Volume2,
+} from "lucide-react"
+import { TypedSocket, playItemFromPlaylist } from "../../lib/socket"
+import { MediaOption, RoomState, Subtitle, TargetState } from "../../lib/types"
 import { getTargetTime, isSync } from "../../lib/utils"
-import BufferAlert from "components/alert/BufferAlert"
-import { getDefaultSrc } from "../../lib/env"
-import AutoplayAlert from "../alert/AutoplayAlert"
+import {
+  mediaArtwork,
+  mediaProvider,
+  mediaTitle,
+  isImageSource,
+} from "../../lib/media"
+import { getDefaultImg } from "../../lib/env"
+import { Button } from "../ui/button"
+import Controls from "./Controls"
 
-interface Props {
-  roomId: string
-  socket: Socket<ServerToClientEvents, ClientToServerEvents>
-  fullHeight?: boolean
+const FullScreenContainer = FullScreen as React.FC<
+  React.PropsWithChildren<FullScreenProps>
+>
+const emptyState: TargetState = {
+  playing: { src: [], sub: [] },
+  playlist: { items: [], currentIndex: -1 },
+  paused: true,
+  progress: 0,
+  playbackRate: 1,
+  loop: false,
+  lastSync: 0,
 }
 
-let seeking = false
-
-const Player: FC<Props> = ({ roomId, socket, fullHeight }) => {
-  // data to be reported to the server
-  // updateX is never allowed to be called outside the _setX functions
-  // _setX should not be called directly, but set via message from the server
-  // setX are the normal plain state hooks
-  const [playlist, updatePlaylist] = useState<Playlist>({
-    items: [],
-    currentIndex: -1,
-  })
-  const playlistRef = useRef(playlist)
-  const _setPlaylist = (newPlaylist: Playlist) => {
-    updatePlaylist(newPlaylist)
-    playlistRef.current = newPlaylist
-  }
-  const [playing, updatePlaying] = useState<MediaElement>({ sub: [], src: [] })
-  const playingRef = useRef(playing)
-  const _setPlaying = (newPlaying: MediaElement) => {
-    updatePlaying(newPlaying)
-    playingRef.current = newPlaying
-  }
-  const [paused, updatePaused] = useState(false)
-  const pausedRef = useRef(paused)
-  const _setPaused = (newPaused: boolean) => {
-    updatePaused(newPaused)
-    pausedRef.current = newPaused
-  }
-  const setPaused = (newPaused: boolean) => {
-    socket?.emit("setPaused", newPaused)
-  }
-  const [volume, setVolume] = useState(1)
-  const [muted, setMuted] = useState(true)
-  const [playbackRate, updatePlaybackRate] = useState(1)
-  const playbackRateRef = useRef(playbackRate)
-  const _setPlaybackRate = (newPlaybackRate: number) => {
-    updatePlaybackRate(newPlaybackRate)
-    playbackRateRef.current = newPlaybackRate
-  }
-  const setPlaybackRate = (newPlaybackRate: number) =>
-    socket?.emit("setPlaybackRate", newPlaybackRate)
-  const [targetProgress, updateTargetProgress] = useState(0)
-  const targetProgressRef = useRef(targetProgress)
-  const _setTargetProgress = (newTargetProgress: number) => {
-    updateTargetProgress(newTargetProgress)
-    targetProgressRef.current = newTargetProgress
-  }
-  const [progress, _setProgress] = useState(0)
-  const setProgress = (newProgress: number) => {
-    socket?.emit("setProgress", newProgress)
-    _setProgress(newProgress)
-  }
-  const [loop, updateLoop] = useState(false)
-  const loopRef = useRef(loop)
-  const _setLoop = (newLoop: boolean) => {
-    updateLoop(newLoop)
-    loopRef.current = newLoop
-  }
-  const setLoop = (newLoop: boolean) => socket?.emit("setLoop", newLoop)
-  const [lastSync, updateLastSync] = useState(new Date().getTime() / 1000)
-  const lastSyncRef = useRef(lastSync)
-  const _setLastSync = (newLastSync: number) => {
-    updateLastSync(newLastSync)
-    lastSyncRef.current = newLastSync
-  }
-  const [deltaServerTime, _setDeltaServerTime] = useState(0)
-  const deltaServerTimeRef = useRef(deltaServerTime)
-  const setDeltaServerTime = (newDeltaServerTime: number) => {
-    _setDeltaServerTime(newDeltaServerTime)
-    deltaServerTimeRef.current = newDeltaServerTime
-  }
-
-  const [duration, setDuration] = useState(0)
+export default function Player({
+  roomId,
+  socket,
+  fullHeight = false,
+}: {
+  roomId: string
+  socket: TypedSocket
+  fullHeight?: boolean
+}) {
+  const [target, setTarget] = useState<TargetState>(emptyState)
+  const targetRef = useRef(target)
   const [currentSrc, setCurrentSrc] = useState<MediaOption>({
-    src: getDefaultSrc(),
+    src: "",
     resolution: "",
   })
-  const [currentSub, setCurrentSub] = useState<Subtitle>({ src: "", lang: "" })
-  const [ownerId, setOwnerId] = useState<string>("")
-  const [isOwner, setIsOwner] = useState(false)
-
-  const [error, setError] = useState(null)
-  const [ready, _setReady] = useState(false)
-  const readyRef = useRef(ready)
-  const setReady = (newReady: boolean) => {
-    _setReady(newReady)
-    readyRef.current = newReady
-  }
-  const [seeked, _setSeeked] = useState(false)
-  const seekedRef = useRef(seeked)
-  const setSeeked = (newSeeked: boolean) => {
-    _setSeeked(newSeeked)
-    seekedRef.current = newSeeked
-  }
-  const [buffering, setBuffering] = useState(true)
-  const [connected, setConnected] = useState(false)
-  const [unmuted, setUnmuted] = useState(false)
-  const [fullscreen, setFullscreen] = useState(false)
-  const [pipEnabled, setPipEnabled] = useState(false)
+  const [currentSub, setCurrentSub] = useState<Subtitle>({
+    src: "",
+    lang: "Off",
+  })
+  const [owner, setOwner] = useState(false)
+  const ownerRef = useRef(false)
+  const [connected, setConnected] = useState(socket.connected)
   const [musicMode, setMusicMode] = useState(false)
-  const fullscreenHandle = useFullScreenHandle()
+  const [muted, setMuted] = useState(true)
+  const [volume, setVolume] = useState(1)
+  const [progress, setProgress] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [ready, setReady] = useState(false)
+  const [buffering, setBuffering] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState("")
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false)
+  const [reload, setReload] = useState(0)
+  const [pip, setPip] = useState(false)
+  const [theater, setTheater] = useState(false)
   const player = useRef<ReactPlayer>(null)
+  const container = useRef<HTMLDivElement>(null)
+  const seeking = useRef(false)
+  const setSeeking = useCallback((value: boolean) => {
+    seeking.current = value
+  }, [])
+  const delta = useRef<number | null>(null)
+  const reportedAt = useRef(0)
+  const recovery = useRef<AbortController | null>(null)
+  const triedFallback = useRef(false)
+  const fullscreenHandle = useFullScreenHandle()
+  const fullscreen = fullscreenHandle.active || theater
+  const canonicalSrc = target.playing.src?.[0]?.src || ""
+  const imageSource =
+    isImageSource(currentSrc.src) ||
+    (!!getDefaultImg() && currentSrc.src === getDefaultImg())
+  const artwork = mediaArtwork(target.playing)
+  const title = mediaTitle(target.playing)
+  const canControl = owner && connected
 
   useEffect(() => {
-    if (!muted && !unmuted) {
-      setUnmuted(true)
+    const onConnect = () => {
+      setConnected(true)
+      delta.current = null
+      socket.emit("fetch")
     }
-  }, [muted, unmuted])
+    const onDisconnect = () => setConnected(false)
+    const onUpdate = (room: RoomState) => {
+      if (delta.current === null)
+        delta.current = (room.serverTime - Date.now()) / 1000
+      ownerRef.current = room.ownerId === socket.id
+      setOwner(ownerRef.current)
+      setMusicMode(!!room.musicMode)
+      targetRef.current = room.targetState
+      setTarget((previous) =>
+        JSON.stringify(previous) === JSON.stringify(room.targetState)
+          ? previous
+          : room.targetState
+      )
+    }
+    socket.on("connect", onConnect)
+    socket.on("disconnect", onDisconnect)
+    socket.on("update", onUpdate)
+    socket.emit("fetch")
+    return () => {
+      socket.off("connect", onConnect)
+      socket.off("disconnect", onDisconnect)
+      socket.off("update", onUpdate)
+    }
+  }, [socket])
+
+  // Room state must load before media is ready (including an empty or image welcome screen).
+  useEffect(() => {
+    recovery.current?.abort()
+    recovery.current = null
+    triedFallback.current = false
+    setCurrentSrc({
+      src: canonicalSrc,
+      resolution: targetRef.current.playing.src[0]?.resolution || "",
+    })
+    setCurrentSub({ src: "", lang: "Off" })
+    setDuration(0)
+    setProgress(0)
+    setError(null)
+    setNotice("")
+    setPip(false)
+    return () => {
+      recovery.current?.abort()
+      recovery.current = null
+    }
+  }, [canonicalSrc])
 
   useEffect(() => {
+    setReady(false)
+    setBuffering(!!currentSrc.src && !imageSource)
+    setError(null)
+  }, [currentSrc.src, imageSource, reload])
+
+  useEffect(() => {
+    if (!ready || !player.current || seeking.current || imageSource) return
+    const clock = target.lastSync - (delta.current || 0)
+    const actual = player.current.getCurrentTime()
     if (
-      !readyRef.current ||
-      player.current === null ||
-      typeof player.current === "undefined"
-    )
-      return
-    if (
+      Number.isFinite(actual) &&
       !isSync(
-        player.current.getCurrentTime(),
-        targetProgress,
-        lastSync - deltaServerTime,
-        paused,
-        playbackRate
-      ) &&
-      !seeking
-    ) {
-      const t = getTargetTime(
-        targetProgress,
-        lastSync - deltaServerTime,
-        paused,
-        playbackRate
+        actual,
+        target.progress,
+        clock,
+        target.paused,
+        target.playbackRate
       )
-      console.log("Not in sync, seeking to", t)
-      player.current.seekTo(t, "seconds")
+    ) {
+      const time = Math.max(
+        0,
+        getTargetTime(
+          target.progress,
+          clock,
+          target.paused,
+          target.playbackRate
+        )
+      )
+      player.current.seekTo(
+        duration > 0 ? Math.min(time, duration) : time,
+        "seconds"
+      )
     }
   }, [
-    progress,
-    targetProgress,
-    lastSync,
-    deltaServerTime,
-    paused,
     ready,
-    playbackRate,
+    progress,
+    target.lastSync,
+    target.progress,
+    target.paused,
+    target.playbackRate,
+    duration,
+    imageSource,
   ])
 
   useEffect(() => {
-    socket.on("connect", () => {
-      setConnected(true)
-    })
-    socket.on("disconnect", () => {
-      setConnected(false)
-    })
-    if (socket.connected) {
-      setConnected(true)
+    if (!theater) return
+    const previous = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setTheater(false)
     }
-
-    socket.on("update", (room: RoomState) => {
-      if (!readyRef.current) {
-        return console.log("Not ready yet...")
-      }
-
-      if (deltaServerTimeRef.current === 0) {
-        setDeltaServerTime((room.serverTime - new Date().getTime()) / 1000)
-      }
-
-      // Update owner info
-      if (room.ownerId !== ownerId) {
-        setOwnerId(room.ownerId)
-        setIsOwner(socket.id === room.ownerId)
-      }
-
-      // Update music mode from server
-      if (room.musicMode !== undefined && room.musicMode !== musicMode) {
-        setMusicMode(room.musicMode)
-      }
-
-      const update = room.targetState
-      if (update.lastSync !== lastSyncRef.current) {
-        _setLastSync(update.lastSync)
-      }
-      if (update.progress !== targetProgressRef.current) {
-        _setTargetProgress(update.progress)
-        setSeeked(false)
-      }
-      if (
-        JSON.stringify(update.playing) !== JSON.stringify(playingRef.current)
-      ) {
-        _setPlaying(update.playing)
-        setCurrentSrc(update.playing.src[0])
-      }
-      if (update.paused !== pausedRef.current) {
-        _setPaused(update.paused)
-      }
-      if (update.playbackRate !== playbackRateRef.current) {
-        _setPlaybackRate(update.playbackRate)
-      }
-      if (update.loop !== loopRef.current) {
-        _setLoop(update.loop)
-      }
-      if (
-        JSON.stringify(update.playlist) !== JSON.stringify(playlistRef.current)
-      ) {
-        _setPlaylist(update.playlist)
-      }
-    })
-  }, [socket, ownerId, musicMode])
-
-  useEffect(() => {
-    if (ready) {
-      socket.emit("fetch")
+    document.addEventListener("keydown", escape)
+    return () => {
+      document.body.style.overflow = previous
+      document.removeEventListener("keydown", escape)
     }
-  }, [ready, socket])
+  }, [theater])
 
-  const FullScreenWithChildren = FullScreen as React.FC<
-    React.PropsWithChildren<FullScreenProps>
-  >
+  const toggleFullscreen = async () => {
+    try {
+      if (theater) setTheater(false)
+      else if (fullscreenHandle.active) await fullscreenHandle.exit()
+      else await fullscreenHandle.enter()
+    } catch {
+      setTheater(true)
+    } // iOS without element fullscreen still gets a full-window player.
+  }
+
+  const togglePip = async () => {
+    const internal = player.current?.getInternalPlayer()
+    if (document.pictureInPictureElement) {
+      try {
+        await document.exitPictureInPicture()
+        setPip(false)
+      } catch {
+        setNotice("Couldn’t close the floating player. Use its close button.")
+      }
+      return
+    }
+    if (
+      internal instanceof HTMLVideoElement &&
+      document.pictureInPictureEnabled &&
+      !internal.disablePictureInPicture
+    ) {
+      try {
+        await internal.requestPictureInPicture()
+        setPip(true)
+      } catch {
+        setNotice("Picture-in-picture isn’t available for this video yet.")
+      }
+      return
+    }
+    // YouTube embeds do not support ReactPlayer's native PiP prop.
+    const popup = window.open(
+      `/embed/${encodeURIComponent(roomId)}`,
+      "syncmusic-mini",
+      "width=640,height=400,resizable=yes"
+    )
+    if (popup) popup.focus()
+    else setNotice("Allow pop-ups to open the mini player.")
+  }
+
+  const resumeAudio = () => {
+    setMuted(false)
+    setAutoplayBlocked(false)
+    const internal = player.current?.getInternalPlayer()
+    if (!targetRef.current.paused && internal) {
+      if (typeof internal.play === "function")
+        internal.play()?.catch?.(() => setAutoplayBlocked(true))
+      else if (typeof internal.playVideo === "function") internal.playVideo()
+    }
+  }
+
+  const onPlaybackError = async (event: unknown) => {
+    setBuffering(false)
+    // Providers also emit numbers and strings; never use `in` on those values.
+    const canRecover =
+      typeof event === "object" &&
+      event !== null &&
+      "type" in event &&
+      event.type === "error"
+    if (!canRecover || triedFallback.current) {
+      setError("This source couldn’t be played. Retry or choose another link.")
+      return
+    }
+    triedFallback.current = true
+    const controller = new AbortController()
+    recovery.current?.abort()
+    recovery.current = controller
+    const timeout = setTimeout(() => controller.abort(), 20000)
+    setNotice("Trying an alternate stream…")
+    try {
+      const response = await fetch("/api/source", {
+        method: "POST",
+        body: canonicalSrc,
+        signal: controller.signal,
+      })
+      if (!response.ok) throw new Error("Source unavailable")
+      const data = await response.json()
+      const source =
+        typeof data.stdout === "string"
+          ? data.stdout
+              .split("\n")
+              .find((value: string) => /^https?:\/\//.test(value))
+          : undefined
+      if (data.error || !source) throw new Error("No playable stream")
+      if (recovery.current === controller && !controller.signal.aborted) {
+        setCurrentSrc({ src: source, resolution: "" })
+        setNotice("")
+      }
+    } catch {
+      if (recovery.current === controller) {
+        setError(
+          "This source couldn’t be played. Retry or choose another link."
+        )
+        setNotice("")
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
   return (
-    <FullScreenWithChildren
-      className={"relative grow flex select-none"}
-      handle={fullscreenHandle}
-      onChange={(state, _) => {
-        if (fullscreen !== state) {
-          setFullscreen(state)
-        }
-      }}
+    <div
+      className={`player-shell ${fullHeight ? "player-embed" : ""}`}
+      ref={container}
     >
-      {musicMode && (
-        <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-primary-900 to-dark-900">
-          <div className="flex flex-col items-center gap-4 text-primary-300">
-            <svg className="w-32 h-32" fill="currentColor" viewBox="0 0 512 512">
-              <path d='M470.38 1.51L150.41 96A32 32 0 0 0 128 126.51v261.41A139 139 0 0 0 96 384c-53 0-96 28.66-96 64s43 64 96 64 96-28.66 96-64V214.32l256-75v184.61a138.4 138.4 0 0 0-32-3.93c-53 0-96 28.66-96 64s43 64 96 64 96-28.65 96-64V32a32 32 0 0 0-41.62-30.49z' />
-            </svg>
-            <div className="text-2xl font-semibold">Music Mode</div>
-            <div className="text-sm text-primary-400">Audio continues playing</div>
+      <FullScreenContainer
+        handle={fullscreenHandle}
+        className={`player-stage ${fullscreen ? "player-expanded" : ""} ${
+          theater ? "player-theater" : ""
+        } ${musicMode ? "player-music" : ""}`}
+      >
+        <div className='player-media'>
+          {imageSource ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              className='welcome-image'
+              src={currentSrc.src}
+              alt='Room welcome screen'
+              onError={() =>
+                setError(
+                  "The welcome image couldn’t load. Paste a media link below to start listening."
+                )
+              }
+            />
+          ) : currentSrc.src ? (
+            <ReactPlayer
+              key={reload}
+              ref={player}
+              width='100%'
+              height='100%'
+              style={{ visibility: musicMode ? "hidden" : "visible" }}
+              url={currentSrc.src}
+              playing={!target.paused}
+              controls={false}
+              playbackRate={target.playbackRate}
+              volume={volume}
+              muted={muted}
+              playsinline
+              config={{
+                youtube: {
+                  playerVars: {
+                    disablekb: 1,
+                    origin:
+                      typeof window !== "undefined"
+                        ? window.location.origin
+                        : undefined,
+                    rel: 0,
+                  },
+                },
+                file: {
+                  hlsVersion: "1.1.3",
+                  dashVersion: "4.2.1",
+                  flvVersion: "1.6.2",
+                  attributes: {
+                    crossOrigin: currentSub.src ? "anonymous" : undefined,
+                  },
+                  tracks: currentSub.src
+                    ? [
+                        {
+                          kind: "subtitles",
+                          src: currentSub.src,
+                          srcLang: currentSub.lang,
+                          label: currentSub.lang,
+                          default: true,
+                        },
+                      ]
+                    : [],
+                },
+              }}
+              onReady={() => {
+                setReady(true)
+                setBuffering(false)
+                setError(null)
+                socket.emit("fetch")
+              }}
+              onPlay={() => {
+                setBuffering(false)
+                setAutoplayBlocked(false)
+                const internal = player.current?.getInternalPlayer()
+                if (targetRef.current.paused) {
+                  internal?.pause?.()
+                  internal?.pauseVideo?.()
+                }
+              }}
+              onPause={() => {
+                // Keep local provider pauses from silently drifting away from the room.
+                if (targetRef.current.paused || seeking.current) return
+                const internal = player.current?.getInternalPlayer()
+                if (typeof internal?.play === "function")
+                  internal.play()?.catch?.(() => setAutoplayBlocked(true))
+                else internal?.playVideo?.()
+              }}
+              onBuffer={() => setBuffering(true)}
+              onBufferEnd={() => setBuffering(false)}
+              onEnded={() => {
+                if (ownerRef.current) socket.emit("playEnded")
+              }}
+              onError={onPlaybackError}
+              onProgress={({ playedSeconds }) => {
+                if (!Number.isFinite(playedSeconds) || seeking.current) return
+                setReady(true)
+                setProgress(playedSeconds)
+                if (socket.connected && Date.now() - reportedAt.current > 900) {
+                  reportedAt.current = Date.now()
+                  socket.emit("setProgress", playedSeconds)
+                }
+              }}
+              onDuration={(value) =>
+                setDuration(Number.isFinite(value) ? Math.max(0, value) : 0)
+              }
+              onEnablePIP={() => setPip(true)}
+              onDisablePIP={() => setPip(false)}
+            />
+          ) : null}
+        </div>
+        {(musicMode || !currentSrc.src) && (
+          <div className='music-canvas'>
+            <div className='music-artwork'>
+              {artwork ? (
+                <Artwork src={artwork} />
+              ) : (
+                <Headphones size={72} strokeWidth={1} />
+              )}
+              <span className='music-art-badge'>
+                <AudioLines size={18} />
+              </span>
+            </div>
+            <div className='music-caption'>
+              <span className='player-eyebrow'>
+                {currentSrc.src ? "JUST YOU & THE MUSIC" : "READY WHEN YOU ARE"}
+              </span>
+              <h2>
+                {currentSrc.src ? title : "A little closer, through music."}
+              </h2>
+              <p>
+                {currentSrc.src
+                  ? mediaProvider(currentSrc.src)
+                  : "Add a track. Invite your people. Press play."}
+              </p>
+            </div>
+          </div>
+        )}
+        <Controls
+          roomId={roomId}
+          playing={target.playing}
+          playlist={target.playlist}
+          currentSrc={currentSrc}
+          setCurrentSrc={setCurrentSrc}
+          currentSub={currentSub}
+          setCurrentSub={setCurrentSub}
+          paused={target.paused}
+          setPaused={(value) => {
+            if (canControl) {
+              if (!value) resumeAudio()
+              socket.emit("setPaused", value)
+            }
+          }}
+          volume={volume}
+          setVolume={setVolume}
+          muted={muted}
+          setMuted={setMuted}
+          progress={progress}
+          duration={duration}
+          setProgress={(value) => {
+            if (canControl && duration > 0) {
+              const time = Math.max(0, Math.min(duration, value))
+              player.current?.seekTo(time, "seconds")
+              setProgress(time)
+              socket.emit("seek", time)
+            }
+          }}
+          playbackRate={target.playbackRate}
+          setPlaybackRate={(value) => {
+            if (canControl) socket.emit("setPlaybackRate", value)
+          }}
+          loop={target.loop}
+          setLoop={(value) => {
+            if (canControl) socket.emit("setLoop", value)
+          }}
+          fullscreen={fullscreen}
+          toggleFullscreen={toggleFullscreen}
+          playIndex={(index) => {
+            if (canControl) playItemFromPlaylist(socket, target.playlist, index)
+          }}
+          setSeeking={setSeeking}
+          playAgain={() => {
+            if (canControl) socket.emit("playAgain")
+          }}
+          canControl={canControl}
+          pipEnabled={pip}
+          togglePip={togglePip}
+          musicMode={musicMode}
+          setMusicMode={(value) => {
+            if (canControl) socket.emit("setMusicMode", value)
+          }}
+          hasMedia={!!currentSrc.src && !imageSource}
+        />
+        <div className='player-status'>
+          {!connected && (
+            <span className='player-status-chip' role='status'>
+              <Radio size={14} /> Reconnecting…
+            </span>
+          )}
+          {buffering && !error && (
+            <span className='player-status-chip' role='status'>
+              <Loader2 size={14} className='spin' /> Buffering
+            </span>
+          )}
+          {(muted || autoplayBlocked) && currentSrc.src && !imageSource && (
+            <Button className='player-sound-prompt' onClick={resumeAudio}>
+              <Volume2 />
+              {autoplayBlocked ? "Tap to resume audio" : "Tap to enable sound"}
+            </Button>
+          )}
+        </div>
+        {error && (
+          <div className='player-error' role='alert'>
+            <AlertCircle size={25} />
+            <strong>Let’s get the music back.</strong>
+            <p>{error}</p>
+            <Button
+              className='player-retry'
+              onClick={() => {
+                recovery.current?.abort()
+                recovery.current = null
+                triedFallback.current = false
+                setNotice("")
+                setError(null)
+                setCurrentSrc({ src: canonicalSrc, resolution: "" })
+                setReload((value) => value + 1)
+                socket.emit("fetch")
+              }}
+            >
+              Retry playback
+            </Button>
+          </div>
+        )}
+        {notice && (
+          <div className='player-notice' role='status'>
+            {notice}
+            <button aria-label='Dismiss message' onClick={() => setNotice("")}>
+              ×
+            </button>
+          </div>
+        )}
+      </FullScreenContainer>
+      {!fullHeight && (
+        <div className='now-playing'>
+          <div className='now-art'>
+            {artwork ? <Artwork src={artwork} /> : <AudioLines size={24} />}
+          </div>
+          <div className='now-copy'>
+            <span className='room-eyebrow'>
+              {imageSource ? "WELCOME TO YOUR ROOM" : "NOW PLAYING"}
+            </span>
+            <h2>{imageSource ? "Your soundtrack starts here" : title}</h2>
+            <p>
+              {imageSource
+                ? "Paste a link below or discover something new."
+                : mediaProvider(canonicalSrc)}
+            </p>
+          </div>
+          <div className='now-role'>
+            <Radio size={14} />
+            <span>{owner ? "You’re the host" : "Host controls playback"}</span>
           </div>
         </div>
       )}
-      <ReactPlayer
-        className={fullscreen || fullHeight ? "video-fullscreen" : "video-normal"}
-        style={{
-          visibility: musicMode ? "hidden" : "visible",
-          height: musicMode ? "0px" : undefined,
-        }}
-        ref={player}
-        width={"100%"}
-        height={fullscreen || fullHeight ? "100dvh" : "calc((9 / 16) * 100vw)"}
-        config={{
-          youtube: {
-            playerVars: {
-              disablekb: 1,
-              modestbranding: 1,
-              origin: window.location.host,
-              // Enable autoplay to YouTube suggestions when queue is empty
-              // rel=1 shows related videos, autoplay=1 autoplays next video
-              ...(playlist.currentIndex >= playlist.items.length - 1
-                ? { rel: 1, autoplay: 1 }
-                : {}),
-            },
-          },
-          file: {
-            hlsVersion: "1.1.3",
-            dashVersion: "4.2.1",
-            flvVersion: "1.6.2",
-          },
-        }}
-        url={currentSrc.src}
-        pip={pipEnabled}
-        playing={!paused}
-        controls={false}
-        playbackRate={playbackRate}
-        volume={volume}
-        muted={muted}
-        onReady={() => {
-          console.log("React-Player is ready")
-          setReady(true)
-          setBuffering(false)
-          // need "long" timeout for yt to be ready
-          setTimeout(() => {
-            const internalPlayer = player.current?.getInternalPlayer()
-            console.log("Internal player:", player)
-            if (
-              typeof internalPlayer !== "undefined" &&
-              internalPlayer.unloadModule
-            ) {
-              console.log("Unloading cc of youtube player")
-              internalPlayer.unloadModule("cc") // Works for AS3 ignored by html5
-              internalPlayer.unloadModule("captions") // Works for html5 ignored by AS3
-            }
-          }, 1000)
-        }}
-        onPlay={() => {
-          console.log("player started to play")
-          if (paused) {
-            const internalPlayer = player.current?.getInternalPlayer()
-            console.warn("Started to play despite being paused", internalPlayer)
-            if (typeof internalPlayer !== "undefined") {
-              if ("pause" in internalPlayer) {
-                internalPlayer.pause()
-              }
-              if ("pauseVideo" in internalPlayer) {
-                internalPlayer.pauseVideo()
-              }
-            }
-          }
-        }}
-        onPause={() => {
-          console.log("player paused")
-          if (!paused) {
-            const internalPlayer = player.current?.getInternalPlayer()
-            console.warn(
-              "Started to pause despite being not paused",
-              internalPlayer
-            )
-            if (typeof internalPlayer !== "undefined") {
-              if ("play" in internalPlayer) {
-                internalPlayer.play()
-              }
-              if ("playVideo" in internalPlayer) {
-                internalPlayer.playVideo()
-              }
-            }
-          }
-        }}
-        onBuffer={() => setBuffering(true)}
-        onBufferEnd={() => setBuffering(false)}
-        onEnded={() => socket?.emit("playEnded")}
-        onError={(e) => {
-          console.error("playback error", e)
-          if ("target" in e && "type" in e && e.type === "error") {
-            console.log("Trying to get video url via yt-dlp...")
-            fetch("/api/source", { method: "POST", body: currentSrc.src })
-              .then((res) => {
-                if (res.status === 200) {
-                  return res.json()
-                }
-                return res.text()
-              })
-              .then((data) => {
-                console.log("Received data", data)
-                if (typeof data === "string") {
-                  throw new Error(data)
-                }
-                if (data.error) {
-                  throw new Error(data.stderr)
-                }
-
-                const videoSrc: string[] = data.stdout
-                  .split("\n")
-                  .filter((v: string) => v !== "")
-                setCurrentSrc({
-                  src: videoSrc[0],
-                  resolution: "",
-                })
-              })
-              .catch((error) => {
-                console.error("Failed to get video url", error)
-              })
-            setError(e)
-          }
-        }}
-        onProgress={({ playedSeconds }) => {
-          if (!ready) {
-            console.warn(
-              "React-Player did not report it being ready, but already playing"
-            )
-            // sometimes onReady doesn't fire, but if there's playback...
-            setReady(true)
-          }
-          if (!seeking || !seeked) {
-            setProgress(playedSeconds)
-          }
-        }}
-        onDuration={setDuration}
-      />
-
-      <Controls
-        roomId={roomId}
-        playing={playing}
-        setCurrentSrc={setCurrentSrc}
-        setCurrentSub={setCurrentSub}
-        setPaused={setPaused}
-        setVolume={setVolume}
-        setMuted={setMuted}
-        setProgress={(newProgress) => {
-          setSeeked(true)
-          socket?.emit("seek", newProgress)
-        }}
-        setPlaybackRate={setPlaybackRate}
-        setLoop={setLoop}
-        setFullscreen={async (newFullscreen) => {
-          if (fullscreenHandle.active !== newFullscreen) {
-            if (newFullscreen) {
-              await fullscreenHandle.enter()
-            } else {
-              await fullscreenHandle.exit()
-            }
-          }
-          setFullscreen(newFullscreen)
-        }}
-        playlist={playlist}
-        currentSrc={currentSrc}
-        currentSub={currentSub}
-        paused={paused}
-        volume={volume}
-        muted={muted}
-        progress={progress}
-        playbackRate={playbackRate}
-        fullscreen={fullscreen}
-        duration={duration}
-        loop={loop}
-        playIndex={(index) => {
-          playItemFromPlaylist(socket, playlist, index)
-        }}
-        setSeeking={(newSeeking) => {
-          seeking = newSeeking
-        }}
-        lastSync={lastSync}
-        error={error}
-        playAgain={() => socket?.emit("playAgain")}
-        isOwner={isOwner}
-        pipEnabled={pipEnabled}
-        setPipEnabled={setPipEnabled}
-        musicMode={musicMode}
-        setMusicMode={(enabled: boolean) => {
-          // Only emit if user is owner - server will enforce this as well
-          if (isOwner) {
-            socket?.emit("setMusicMode", enabled)
-          }
-        }}
-      />
-
-      <div className={"absolute top-1 left-1 flex flex-col gap-1 p-1"}>
-        {!connected && <ConnectingAlert canClose={false} />}
-        {buffering && <BufferAlert canClose={false} />}
-        {!unmuted && (
-          <AutoplayAlert
-            onClick={() => {
-              setUnmuted(true)
-              setMuted(false)
-            }}
-          />
-        )}
-      </div>
-    </FullScreenWithChildren>
+    </div>
   )
 }
 
-export default Player
+function Artwork({ src }: { src: string }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [src])
+  // eslint-disable-next-line @next/next/no-img-element
+  return failed ? (
+    <AudioLines size={30} />
+  ) : (
+    <Image
+      src={src}
+      alt=''
+      width={320}
+      height={320}
+      unoptimized
+      onError={() => setFailed(true)}
+    />
+  )
+}

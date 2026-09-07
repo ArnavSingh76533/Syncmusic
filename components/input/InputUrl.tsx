@@ -1,82 +1,63 @@
-import { FC, ReactNode, useEffect, useRef, useState } from "react"
-import classNames from "classnames"
-import IconClose from "../icon/IconClose"
+import { ReactNode, useId } from "react"
+import { X } from "lucide-react"
 import { isUrl } from "../../lib/utils"
-
 interface Props {
   url: string
   placeholder: string
   tooltip: string
   onSubmit?: () => void
-  onChange: (url: string) => void
+  onChange: (value: string) => void
   className?: string
   children?: ReactNode
 }
-
-const InputUrl: FC<Props> = ({
+export default function InputUrl({
   url,
   placeholder,
   tooltip,
   onSubmit,
   onChange,
-  className,
+  className = "",
   children,
-}) => {
-  const [valid, setValid] = useState(url === "" || isUrl(url))
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    setValid(url === "" || isUrl(url))
-  }, [url])
-
+}: Props) {
+  const id = useId()
+  const valid = !!url.trim() && isUrl(url.trim())
   return (
     <form
-      onSubmit={(e) => {
-        e.preventDefault()
-        if (onSubmit) {
-          onSubmit()
-        }
+      className={`room-url-form ${className}`}
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (valid) onSubmit?.()
       }}
-      className={classNames("flex flex-col", className)}
     >
-      <div
-        className={"rounded-lg grow flex flex-row items-center bg-dark-800 border border-dark-700/50 focus-within:border-primary-500/50 transition-all duration-200 overflow-hidden"}
-      >
+      <div className='room-url-field'>
         <input
-          ref={inputRef}
-          size={1}
-          className={classNames("grow bg-transparent p-2.5 outline-none")}
+          type='url'
+          aria-label={placeholder}
+          aria-invalid={!!url && !valid}
+          aria-describedby={url && !valid ? id : undefined}
           placeholder={placeholder}
           value={url}
-          onChange={(event) => {
-            onChange(event.target.value)
-          }}
-          type={"text"}
-          onFocus={() => inputRef.current?.select()}
+          onChange={(event) => onChange(event.target.value)}
         />
         {url && (
-          <div className={"p-2 cursor-pointer hover:text-red-400 transition-colors"} onClick={() => onChange("")}>
-            <IconClose />
-          </div>
-        )}
-        <div>
           <button
-            type={"submit"}
-            data-tooltip-content={tooltip}
-            className={classNames(
-              "px-4 py-2.5 font-medium transition-all duration-200",
-              valid
-                ? "bg-primary-600 hover:bg-primary-700 active:bg-primary-800"
-                : "bg-red-600 hover:bg-red-700 active:bg-red-800"
-            )}
+            type='button'
+            className='room-url-clear'
+            aria-label='Clear link'
+            onClick={() => onChange("")}
           >
-            {children}
+            <X size={15} />
           </button>
-        </div>
+        )}
+        <button type='submit' title={tooltip} disabled={!valid}>
+          {children}
+        </button>
       </div>
-      {!valid && <div className={"text-red-400 text-sm mt-1"}>Invalid url</div>}
+      {url && !valid && (
+        <p id={id} className='room-url-error'>
+          Enter a valid https:// or http:// link.
+        </p>
+      )}
     </form>
   )
 }
-
-export default InputUrl

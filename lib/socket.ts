@@ -40,8 +40,8 @@ export interface ClientToServerEvents {
   seek: (progress: number) => void
 
   // Playback and fetching
-  playUrl: (src: string) => void
-  addToPlaylist: (url: string) => void // NEW: add without playing
+  playUrl: (src: string, metadata?: Pick<MediaElement, "title" | "thumbnail">) => void
+  addToPlaylist: (url: string, metadata?: Pick<MediaElement, "title" | "thumbnail">) => void // NEW: add without playing
   playAgain: () => void
   playEnded: () => void
   fetch: () => void

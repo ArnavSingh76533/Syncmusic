@@ -1,133 +1,152 @@
 "use client"
-import { FC, useEffect, useRef, useState } from "react"
-import { Socket } from "socket.io-client"
-import { ClientToServerEvents, ServerToClientEvents } from "../../lib/socket"
+import { useEffect, useRef, useState } from "react"
+import { MessageCircle, Send } from "lucide-react"
+import { TypedSocket } from "../../lib/socket"
+import { ChatMessage, RoomState } from "../../lib/types"
+import { Button } from "../ui/button"
 
-type ChatMessage = {
-  id: string
-  userId: string
-  name: string
-  text: string
-  ts: number
-}
-
-interface Props {
-  socket: Socket<ServerToClientEvents, ClientToServerEvents>
-  className?: string
-}
-
-// Audio notification constants
-const NOTIFICATION_FREQUENCY = 800
-const NOTIFICATION_VOLUME = 0.3
-const NOTIFICATION_VOLUME_END = 0.01
-const NOTIFICATION_DURATION = 0.1
-
-// Reusable audio context for notifications
-let audioContext: AudioContext | null = null
-
-const getAudioContext = () => {
-  if (!audioContext) {
-    audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
-  }
-  return audioContext
-}
-
-const ChatPanel: FC<Props> = ({ socket, className }) => {
-  const [messages, _setMessages] = useState<ChatMessage[]>([])
+export default function ChatPanel({ socket }: { socket: TypedSocket }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [text, setText] = useState("")
-  const messagesRef = useRef(messages)
-  const setMessages = (m: ChatMessage[]) => {
-    messagesRef.current = m
-    _setMessages(m)
-  }
-
+  const [coolingDown, setCoolingDown] = useState(false)
+  const audioContext = useRef<AudioContext | null>(null)
+  const cooldown = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    const onHistory = (history: ChatMessage[]) => {
-      setMessages(history)
-    }
-    const onNew = (msg: ChatMessage) => {
-      setMessages([...messagesRef.current, msg].slice(-200))
-      // Play notification sound using Web Audio API
-      try {
-        const ctx = getAudioContext()
-        const oscillator = ctx.createOscillator()
-        const gainNode = ctx.createGain()
-        
-        oscillator.connect(gainNode)
-        gainNode.connect(ctx.destination)
-        
-        oscillator.frequency.value = NOTIFICATION_FREQUENCY
-        oscillator.type = 'sine'
-        
-        gainNode.gain.setValueAtTime(NOTIFICATION_VOLUME, ctx.currentTime)
-        gainNode.gain.exponentialRampToValueAtTime(NOTIFICATION_VOLUME_END, ctx.currentTime + NOTIFICATION_DURATION)
-        
-        oscillator.start(ctx.currentTime)
-        oscillator.stop(ctx.currentTime + NOTIFICATION_DURATION)
-      } catch (err) {
-        console.log("Audio notification failed:", err)
+    const onHistory = (history: ChatMessage[]) => setMessages(history)
+    const onNew = (message: ChatMessage) => {
+      if (message.userId !== socket.id) {
+        try {
+          const Audio =
+            window.AudioContext || (window as any).webkitAudioContext
+          if (!audioContext.current && Audio) audioContext.current = new Audio()
+          const context = audioContext.current
+          if (context?.state === "running") {
+            const tone = context.createOscillator()
+            const gain = context.createGain()
+            tone.connect(gain)
+            gain.connect(context.destination)
+            tone.frequency.value = 800
+            gain.gain.setValueAtTime(0.15, context.currentTime)
+            gain.gain.exponentialRampToValueAtTime(
+              0.001,
+              context.currentTime + 0.1
+            )
+            tone.onended = () => {
+              tone.disconnect()
+              gain.disconnect()
+            }
+            tone.start()
+            tone.stop(context.currentTime + 0.1)
+          }
+        } catch {
+          /* Audio notifications are optional on muted or restricted browsers. */
+        }
       }
+      setMessages((previous) =>
+        previous.some((item) => item.id === message.id)
+          ? previous
+          : [...previous, message].slice(-200)
+      )
     }
-
+    // The initial history event may arrive before this panel mounts; fetch also carries it.
+    const onUpdate = (room: RoomState) => {
+      if (room.chatLog)
+        setMessages((previous) => {
+          const merged = new Map(
+            previous.map((message) => [message.id, message])
+          )
+          room.chatLog?.forEach((message) => merged.set(message.id, message))
+          return Array.from(merged.values())
+            .sort((a, b) => a.ts - b.ts)
+            .slice(-200)
+        })
+    }
     socket.on("chatHistory", onHistory)
     socket.on("chatNew", onNew)
+    socket.on("update", onUpdate)
+    socket.emit("fetch")
     return () => {
       socket.off("chatHistory", onHistory)
       socket.off("chatNew", onNew)
+      socket.off("update", onUpdate)
+      if (cooldown.current) clearTimeout(cooldown.current)
+      void audioContext.current?.close().catch(() => {})
+      audioContext.current = null
     }
   }, [socket])
-
   const send = () => {
-    const trimmed = text.trim()
-    if (!trimmed) return
-    socket.emit("chatMessage", trimmed)
+    if (!text.trim() || !socket.connected || coolingDown) return
+    socket.emit("chatMessage", text.trim())
     setText("")
+    setCoolingDown(true)
+    cooldown.current = setTimeout(() => setCoolingDown(false), 800)
   }
-
   return (
-    <div className={className ?? "flex flex-col h-64 border border-dark-700/50 rounded-xl overflow-hidden shadow-lg bg-dark-900"}>
-      <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-dark-900/50 flex flex-col-reverse">
+    <section className='chat-panel'>
+      <div className='chat-header'>
+        <h2>The conversation</h2>
+        <p>Same track. Same moment.</p>
+      </div>
+      <div
+        className='chat-messages'
+        role='log'
+        aria-label='Room messages'
+        aria-live='polite'
+        aria-relevant='additions'
+      >
         {messages.length === 0 ? (
-          <div className="text-dark-500 text-sm text-center py-8">
-            No messages yet. Be the first to say hello! 👋
+          <div className='panel-empty'>
+            <MessageCircle />
+            <strong>Music is better with company.</strong>
+            <p>Say hello, share a thought, or ask for the next track.</p>
           </div>
         ) : (
-          // Render messages in reverse order without creating a new array
-          messages.map((_, idx) => {
-            const reverseIdx = messages.length - 1 - idx
-            const msg = messages[reverseIdx]
-            return (
-              <div key={msg.id} className="text-sm bg-dark-800/50 rounded-lg p-3 border border-dark-700/30">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="font-semibold text-primary-400">{msg.name}</span>
-                  <span className="text-dark-500 text-xs">•</span>
-                  <span className="text-dark-500 text-xs">{new Date(msg.ts).toLocaleTimeString()}</span>
-                </div>
-                <div className="break-words text-dark-200">{msg.text}</div>
+          [...messages].reverse().map((message) => (
+            <div
+              className={`chat-message ${
+                message.userId === socket.id ? "is-self" : ""
+              }`}
+              key={message.id}
+            >
+              <div className='chat-message-meta'>
+                <strong>
+                  {message.userId === socket.id ? "You" : message.name}
+                </strong>
+                <time dateTime={new Date(message.ts).toISOString()}>
+                  {new Date(message.ts).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </time>
               </div>
-            )
-          })
+              <div className='chat-bubble'>{message.text}</div>
+            </div>
+          ))
         )}
       </div>
-      <div className="p-3 flex gap-2 bg-dark-800/50 border-t border-dark-700/50">
+      <form
+        className='chat-composer'
+        onSubmit={(event) => {
+          event.preventDefault()
+          send()
+        }}
+      >
         <input
-          className="input flex-1 bg-dark-800 border border-dark-700/50 focus:border-primary-500/50 p-2.5 rounded-lg outline-none transition-all duration-200"
-          placeholder="Type a message…"
+          aria-label='Message the room'
+          placeholder='Say something nice…'
+          maxLength={500}
           value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") send()
-          }}
+          onChange={(event) => setText(event.target.value)}
         />
-        <button 
-          className="btn bg-primary-600 hover:bg-primary-700 active:bg-primary-800 px-4 rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-glow" 
-          onClick={send}
+        <Button
+          className='room-primary'
+          type='submit'
+          aria-label='Send message'
+          disabled={!text.trim() || !socket.connected || coolingDown}
         >
-          Send
-        </button>
-      </div>
-    </div>
+          <Send />
+        </Button>
+      </form>
+    </section>
   )
 }
-
-export default ChatPanel

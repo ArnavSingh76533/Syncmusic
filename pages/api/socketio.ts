@@ -20,7 +20,9 @@ import { getDefaultImg, getDefaultSrc } from "../../lib/env"
  * @param url - The media URL to wrap
  * @returns MediaElement with a single source and no subtitles
  */
-const createMediaElement = (url: string): MediaElement => ({
+const createMediaElement = (url: string, metadata?: Pick<MediaElement, "title" | "thumbnail">): MediaElement => ({
+  title: typeof metadata?.title === "string" ? metadata.title.slice(0, 200) : undefined,
+  thumbnail: typeof metadata?.thumbnail === "string" && /^https?:\/\//.test(metadata.thumbnail) ? metadata.thumbnail : undefined,
   src: [{ src: url, resolution: "" }],
   sub: [],
 })
@@ -194,6 +196,8 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
           if (room === null) {
             throw new Error("Play ended for non existing room:" + roomId)
           }
+          // One authoritative end event prevents simultaneous clients skipping tracks.
+          if (socket.id !== room.ownerId) return
           log("playback ended")
 
           if (room.targetState.loop) {
@@ -213,11 +217,10 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
               room.targetState.playlist.items[currentIdx + 1]
             
             // Remove the finished item from playlist (shift remaining items left)
-            room.targetState.playlist.items.splice(currentIdx, 1)
+            if (currentIdx >= 0) room.targetState.playlist.items.splice(currentIdx, 1)
             
-            // Reset currentIndex to 0 since items have shifted
-            // (the next item is now at position 0)
-            room.targetState.playlist.currentIndex = 0
+            // The next item takes the finished item's position, even mid-queue.
+            room.targetState.playlist.currentIndex = Math.max(0, currentIdx)
             room.targetState.progress = 0
             room.targetState.paused = false
             log("Removed finished item from playlist, shifted remaining items")
@@ -263,6 +266,7 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
           log("playing item", index, "from playlist")
           room.targetState.playing = room.targetState.playlist.items[index]
           room.targetState.playlist.currentIndex = index
+          room.targetState.paused = false
           room.targetState.progress = 0
           room.targetState.lastSync = new Date().getTime() / 1000
           await broadcast(room)
@@ -314,7 +318,7 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
           await broadcast(room)
         })
 
-        socket.on("playUrl", async (url) => {
+        socket.on("playUrl", async (url, metadata) => {
           const room = await getRoom(roomId)
           if (room === null) {
             throw new Error(
@@ -342,7 +346,7 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
 
           // Replace the currently playing video with the new one
           // If there's a current video at index 0, replace it; otherwise add new
-          const newMedia = createMediaElement(url)
+          const newMedia = createMediaElement(url, metadata)
           
           if (room.targetState.playlist.currentIndex >= 0 && 
               room.targetState.playlist.items.length > 0) {
@@ -363,7 +367,7 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
         })
 
         // Add a URL to playlist without immediate playback
-        socket.on("addToPlaylist", async (url) => {
+        socket.on("addToPlaylist", async (url, metadata) => {
           const room = await getRoom(roomId)
           if (room === null) {
             throw new Error(
@@ -373,7 +377,7 @@ const ioHandler = (_: NextApiRequest, res: NextApiResponse) => {
           if (!isUrl(url)) return log("addToPlaylist invalid url", url)
           log("add to playlist", url)
 
-          room.targetState.playlist.items.push(createMediaElement(url))
+          room.targetState.playlist.items.push(createMediaElement(url, metadata))
 
           await broadcast(room)
         })

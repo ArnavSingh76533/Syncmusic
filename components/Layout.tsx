@@ -1,4 +1,5 @@
-import { FC, ReactNode } from "react"
+import { FC, ReactNode, useEffect, useState } from "react"
+import RoomHeader from "./room/RoomHeader"
 import Navbar from "./Navbar"
 import NoScriptAlert from "./alert/NoScriptAlert"
 import Footer from "./Footer"
@@ -19,22 +20,64 @@ const Layout: FC<Props> = ({
   roomId,
   children,
 }) => {
+  const [theme, setTheme] = useState("dark")
+  useEffect(() => {
+    if (!roomId) return
+    try {
+      const saved = localStorage.getItem("syncmusic-theme")
+      setTheme(
+        saved === "light" || saved === "dark"
+          ? saved
+          : window.matchMedia("(prefers-color-scheme: light)").matches
+            ? "light"
+            : "dark"
+      )
+    } catch {
+      /* Dark mode remains available when storage is blocked. */
+    }
+  }, [roomId])
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark"
+    setTheme(next)
+    try {
+      localStorage.setItem("syncmusic-theme", next)
+    } catch {
+      /* optional preference */
+    }
+  }
   return (
-    <div className={"flex flex-col min-h-screen"}>
+    <div
+      className={roomId ? "stream-room" : "flex flex-col min-h-screen"}
+      data-theme={roomId ? theme : undefined}
+    >
       <Head customMeta={meta} />
-      {showNavbar && (
-        <header>
-          <Navbar roomId={roomId} />
-        </header>
-      )}
+      {showNavbar &&
+        (roomId ? (
+          <RoomHeader roomId={roomId} theme={theme} toggleTheme={toggleTheme} />
+        ) : (
+          <header>
+            <Navbar />
+          </header>
+        ))}
 
       <noscript>
         <NoScriptAlert />
       </noscript>
 
-      <main className={"relative flex flex-col grow p-2"}>{children}</main>
+      <main
+        className={roomId ? "room-main" : "relative flex flex-col grow p-2"}
+      >
+        {children}
+      </main>
 
-      <Footer error={error} />
+      {roomId ? (
+        <footer className='room-footer'>
+          <span>Made for listening. Better together.</span>
+          <span>Syncmusic</span>
+        </footer>
+      ) : (
+        <Footer error={error} />
+      )}
     </div>
   )
 }

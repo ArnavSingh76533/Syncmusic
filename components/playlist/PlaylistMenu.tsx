@@ -1,186 +1,126 @@
-import { FC, useEffect, useRef, useState } from "react"
-import { MediaElement, Playlist, RoomState } from "../../lib/types"
-import { DragDropContext as _DragDropContext, Droppable as _Droppable, DragDropContextProps, DroppableProps } from "react-beautiful-dnd"
-import classNames from "classnames"
-import { Socket } from "socket.io-client"
+import { FC, useEffect, useState } from "react"
 import {
-  ClientToServerEvents,
-  playItemFromPlaylist,
-  ServerToClientEvents,
-} from "../../lib/socket"
-import ControlButton from "../input/ControlButton"
-import IconChevron from "../icon/IconChevron"
+  DragDropContext as _DragDropContext,
+  Droppable as _Droppable,
+  DragDropContextProps,
+  DroppableProps,
+} from "react-beautiful-dnd"
+import { ListMusic, GripVertical } from "lucide-react"
+import { Playlist, RoomState } from "../../lib/types"
+import { TypedSocket, playItemFromPlaylist } from "../../lib/socket"
+import { reorderPlaylist } from "../../lib/media"
 import PlaylistItem from "./PlaylistItem"
 import InputUrl from "../input/InputUrl"
 
-// HACK: this fixes type incompatibility
 const DragDropContext = _DragDropContext as unknown as FC<DragDropContextProps>
 const Droppable = _Droppable as unknown as FC<DroppableProps>
-
-interface Props {
-  socket: Socket<ServerToClientEvents, ClientToServerEvents>
-}
-
-const PlaylistMenu: FC<Props> = ({ socket }) => {
-  const [expanded, setExpanded] = useState(true)
-  const [url, setUrl] = useState("")
-
-  const [playlist, _setPlaylist] = useState<Playlist>({
+export default function PlaylistMenu({ socket }: { socket: TypedSocket }) {
+  const [playlist, setPlaylist] = useState<Playlist>({
     items: [],
     currentIndex: -1,
   })
-  const playlistRef = useRef(playlist)
-  const setPlaylist = (newPlaylist: Playlist) => {
-    _setPlaylist(newPlaylist)
-    playlistRef.current = newPlaylist
-  }
-
+  const [url, setUrl] = useState("")
   useEffect(() => {
-    socket.on("update", (room: RoomState) => {
-      if (
-        JSON.stringify(room.targetState.playlist) !==
-        JSON.stringify(playlistRef.current)
-      ) {
-        setPlaylist(room.targetState.playlist)
-      }
-    })
+    const update = (room: RoomState) =>
+      setPlaylist((previous) =>
+        JSON.stringify(previous) === JSON.stringify(room.targetState.playlist)
+          ? previous
+          : room.targetState.playlist
+      )
+    socket.on("update", update)
+    socket.emit("fetch")
+    return () => {
+      socket.off("update", update)
+    }
   }, [socket])
-
-  const addItem = (newUrl: string) => {
-    if (newUrl === "") {
-      return
-    }
-    setUrl("")
-
-    const newMedia: MediaElement = {
-      src: [
-        {
-          src: newUrl,
-          resolution: "",
-        },
-      ],
-      sub: [],
-    }
-    const newPlaylist: Playlist = JSON.parse(JSON.stringify(playlist))
-    newPlaylist.items.push(newMedia)
-    socket.emit("updatePlaylist", newPlaylist)
+  const move = (from: number, to: number) => {
+    if (socket.connected)
+      socket.emit("updatePlaylist", reorderPlaylist(playlist, from, to))
   }
-
   return (
-    <div className={classNames("flex flex-col bg-dark-900/50 rounded-xl border border-dark-700/50 overflow-hidden", expanded && "sm:w-[320px]")}>
-      <ControlButton
-        tooltip={expanded ? "Hide playlist" : "Show playlist"}
-        onClick={() => setExpanded(!expanded)}
-        interaction={() => {}}
-        className={"flex flex-row gap-2 items-center justify-center bg-dark-800 hover:bg-dark-700 p-3 font-medium"}
-      >
-        <IconChevron
-          direction={expanded ? "up" : "down"}
-          className={"sm:rotate-90"}
-        />
-        <div className={classNames(!expanded && "sm:hidden")}>
-          {expanded ? "Hide" : "Show"} Playlist
+    <section className='queue-panel'>
+      <div className='panel-heading'>
+        <div>
+          <h2>On the playlist</h2>
+          <p>A soundtrack everyone can add to.</p>
         </div>
-      </ControlButton>
-      {expanded && (
-        <div className="p-2">
-          <InputUrl
-            url={url}
-            placeholder={"Add url..."}
-            tooltip={"Add url to the playlist"}
-            onChange={setUrl}
-            className={"mb-2"}
-            onSubmit={() => addItem(url)}
-          >
-            Add
-          </InputUrl>
-          <DragDropContext
-            onDragEnd={(result) => {
-              if (!result.destination) {
-                return
-              }
-
-              const newPlaylist: Playlist = JSON.parse(JSON.stringify(playlist))
-              newPlaylist.items.splice(result.source.index, 1)
-              newPlaylist.items.splice(
-                result.destination.index,
-                0,
-                playlist.items[result.source.index]
-              )
-
-              if (
-                playlist.currentIndex > result.source.index &&
-                playlist.currentIndex < result.destination.index
-              ) {
-                newPlaylist.currentIndex--
-              } else if (
-                playlist.currentIndex < result.source.index &&
-                playlist.currentIndex > result.destination.index
-              ) {
-                newPlaylist.currentIndex++
-              } else if (playlist.currentIndex === result.source.index) {
-                newPlaylist.currentIndex = result.destination.index
-              }
-
-              console.log("Playlist updated to:", newPlaylist)
-              socket.emit("updatePlaylist", newPlaylist)
-            }}
-          >
-            <Droppable droppableId={"playlistMenu"}>
-              {(provided, snapshot) => (
-                <div
-                  {...provided.droppableProps}
-                  ref={provided.innerRef}
-                  className={classNames(
-                    "flex flex-col rounded-lg gap-2 min-h-[100px] p-2",
-                    snapshot.isDraggingOver && "bg-dark-800"
-                  )}
-                >
-                  <>
-                    {playlist.items.map((item, index) => (
-                      <PlaylistItem
-                        key={item.src[0].src + "-" + index}
-                        playing={playlist.currentIndex === index}
-                        item={item}
-                        index={index}
-                        deleteItem={(index) => {
-                          if (index < 0 || index >= playlist.items.length) {
-                            return
-                          }
-
-                          const newPlaylist: Playlist = JSON.parse(
-                            JSON.stringify(playlist)
-                          )
-                          newPlaylist.items.splice(index, 1)
-                          if (newPlaylist.currentIndex === index) {
-                            newPlaylist.currentIndex = -1
-                          } else if (newPlaylist.currentIndex > index) {
-                            newPlaylist.currentIndex--
-                          }
-                          socket.emit("updatePlaylist", newPlaylist)
-                        }}
-                        updateTitle={(newTitle) => {
-                          const newPlaylist: Playlist = JSON.parse(
-                            JSON.stringify(playlist)
-                          )
-                          newPlaylist.items[index].title = newTitle
-                          socket.emit("updatePlaylist", newPlaylist)
-                        }}
-                        play={() => {
-                          playItemFromPlaylist(socket, playlist, index)
-                        }}
-                      />
-                    ))}
-                    {provided.placeholder}
-                  </>
+        <span>{playlist.items.length} tracks</span>
+      </div>
+      <InputUrl
+        url={url}
+        placeholder='Add a media link…'
+        tooltip='Add to the queue'
+        onChange={setUrl}
+        onSubmit={() => {
+          if (socket.connected) {
+            socket.emit("addToPlaylist", url.trim())
+            setUrl("")
+          }
+        }}
+      >
+        Add
+      </InputUrl>
+      <DragDropContext
+        onDragEnd={({ source, destination }) => {
+          if (destination && source.index !== destination.index)
+            move(source.index, destination.index)
+        }}
+      >
+        <Droppable droppableId='playlistMenu'>
+          {(provided, snapshot) => (
+            <div
+              {...provided.droppableProps}
+              ref={provided.innerRef}
+              className={`queue-list ${
+                snapshot.isDraggingOver ? "is-dragging-over" : ""
+              }`}
+            >
+              {playlist.items.length === 0 && (
+                <div className='panel-empty'>
+                  <ListMusic />
+                  <strong>Make room for your favorites.</strong>
+                  <p>Add a link above, or find your next track in Discover.</p>
                 </div>
               )}
-            </Droppable>
-          </DragDropContext>
-        </div>
-      )}
-    </div>
+              {playlist.items.map((item, index) => (
+                <PlaylistItem
+                  key={`${item.src?.[0]?.src || "track"}-${index}`}
+                  item={item}
+                  index={index}
+                  playing={playlist.currentIndex === index}
+                  play={() => playItemFromPlaylist(socket, playlist, index)}
+                  deleteItem={() => {
+                    const items = playlist.items.filter(
+                      (_, position) => position !== index
+                    )
+                    const currentIndex =
+                      playlist.currentIndex === index
+                        ? -1
+                        : playlist.currentIndex > index
+                          ? playlist.currentIndex - 1
+                          : playlist.currentIndex
+                    socket.emit("updatePlaylist", { items, currentIndex })
+                  }}
+                  updateTitle={(title) =>
+                    socket.emit("updatePlaylist", {
+                      ...playlist,
+                      items: playlist.items.map((track, position) =>
+                        position === index ? { ...track, title } : track
+                      ),
+                    })
+                  }
+                  moveUp={index > 0 ? () => move(index, index - 1) : undefined}
+                />
+              ))}
+              {provided.placeholder}
+            </div>
+          )}
+        </Droppable>
+      </DragDropContext>
+      <div className='queue-footnote'>
+        <GripVertical size={14} />
+        Drag to reorder · Everyone can add tracks
+      </div>
+    </section>
   )
 }
-
-export default PlaylistMenu

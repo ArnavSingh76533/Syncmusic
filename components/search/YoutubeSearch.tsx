@@ -1,5 +1,10 @@
 "use client"
-import { FC, useState } from "react"
+import Image from "next/image"
+import { FC, useState, useRef, useEffect } from "react"
+import { Search, Plus, Play, Check, Loader2, Headphones } from "lucide-react"
+import { Button } from "../ui/button"
+import { Input } from "../ui/input"
+import { secondsToTime } from "../../lib/utils"
 import { Socket } from "socket.io-client"
 import { ClientToServerEvents, ServerToClientEvents } from "../../lib/socket"
 
@@ -15,7 +20,11 @@ interface Props {
   socket: Socket<ServerToClientEvents, ClientToServerEvents> | null
 }
 
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, ms = 5000) {
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  ms = 5000
+) {
   const controller = new AbortController()
   const t = setTimeout(() => controller.abort(), ms)
   try {
@@ -28,7 +37,11 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
 
 async function searchViaServer(q: string, limit = 8): Promise<Result[] | null> {
   try {
-    const r = await fetchWithTimeout(`/api/search?q=${encodeURIComponent(q)}&limit=${limit}`, {}, 5000)
+    const r = await fetchWithTimeout(
+      `/api/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+      {},
+      5000
+    )
     if (!r.ok) return null
     const data = await r.json()
     return Array.isArray(data?.results) ? data.results : null
@@ -37,7 +50,10 @@ async function searchViaServer(q: string, limit = 8): Promise<Result[] | null> {
   }
 }
 
-async function searchViaPipedClient(q: string, limit = 8): Promise<Result[] | null> {
+async function searchViaPipedClient(
+  q: string,
+  limit = 8
+): Promise<Result[] | null> {
   const instances = [
     "https://pipedapi.kavin.rocks",
     "https://piped.video",
@@ -48,15 +64,27 @@ async function searchViaPipedClient(q: string, limit = 8): Promise<Result[] | nu
     try {
       const url = new URL("/search", base)
       url.searchParams.set("q", q)
-      const r = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 6000)
+      const r = await fetchWithTimeout(
+        url.toString(),
+        { cache: "no-store" },
+        6000
+      )
       if (!r.ok) continue
       const data = await r.json()
       const items: any[] = Array.isArray(data?.items) ? data.items : []
       const results = items
-        .filter((it) => it?.type?.toLowerCase() === "video" && it?.id && it?.title)
+        .filter(
+          (it) =>
+            ["video", "stream"].includes(it?.type?.toLowerCase()) &&
+            (it?.id || it?.url) &&
+            it?.title
+        )
         .slice(0, limit)
         .map((it) => {
-          const id = it.id
+          const id =
+            it.id ||
+            new URL(it.url, "https://www.youtube.com").searchParams.get("v")
+          if (!id) return null
           return {
             id,
             title: it.title,
@@ -65,6 +93,7 @@ async function searchViaPipedClient(q: string, limit = 8): Promise<Result[] | nu
             thumbnails: it.thumbnail ? [{ url: it.thumbnail }] : undefined,
           } as Result
         })
+        .filter((item): item is Result => item !== null)
       if (results.length) return results
     } catch {
       // try next instance
@@ -73,125 +102,179 @@ async function searchViaPipedClient(q: string, limit = 8): Promise<Result[] | nu
   return null
 }
 
-const ACTION_BTN_WIDTH = "w-20" // keeps Search/Play column aligned
-const ADD_BTN_WIDTH = "w-14" // smaller 'Add' button
-
 const YoutubeSearch: FC<Props> = ({ socket }) => {
   const [q, setQ] = useState("")
   const [loading, setLoading] = useState(false)
   const [results, setResults] = useState<Result[]>([])
   const [error, setError] = useState<string | null>(null)
-
+  const [added, setAdded] = useState<string[]>([])
+  const [searched, setSearched] = useState(false)
+  const request = useRef(0)
+  useEffect(
+    () => () => {
+      request.current++
+    },
+    []
+  )
   const search = async () => {
     const query = q.trim()
-    if (!query) return
+    if (!query || loading) return
+    const sequence = ++request.current
     setLoading(true)
     setError(null)
     setResults([])
-
-    let found: Result[] | null = await searchViaServer(query, 8)
-    if (!found || found.length === 0) {
-      found = await searchViaPipedClient(query, 8)
-    }
-
-    if (!found || found.length === 0) {
-      setError("No results or all search methods failed.")
-    } else {
-      setResults(found)
-    }
+    setAdded([])
+    setSearched(true)
+    let found = await searchViaServer(query, 8)
+    if (request.current !== sequence) return
+    if (!found?.length) found = await searchViaPipedClient(query, 8)
+    if (request.current !== sequence) return
+    if (!found?.length)
+      setError(
+        "No tracks found right now. Try another search, or paste a YouTube link in the queue."
+      )
+    else setResults(found)
     setLoading(false)
   }
-
-  const playNow = (url: string) => socket?.emit("playUrl", url)
-  const addToPlaylist = (url: string) => socket?.emit("addToPlaylist", url)
-  const closeResults = () => {
-    setResults([])
-    setError(null)
-  }
-
   return (
-    <div className="flex flex-col gap-3 bg-dark-900 border border-dark-700/50 rounded-xl p-4 shadow-lg">
-      <h3 className="text-lg font-semibold text-primary-400 mb-1">YouTube Search</h3>
-      
-      {/* Search row: input + Search button with fixed width so actions align below */}
-      <div className="grid grid-cols-[1fr_auto] gap-2">
-        <input
-          className="input bg-dark-800 border border-dark-700/50 focus:border-primary-500/50 p-2.5 rounded-lg outline-none transition-all duration-200"
-          placeholder="Search YouTube (e.g., Sira)"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") search()
-          }}
-        />
-        <button
-          onClick={search}
-          className={`btn bg-primary-600 hover:bg-primary-700 active:bg-primary-800 px-4 rounded-lg justify-center font-medium transition-all duration-200 shadow-md hover:shadow-glow ${ACTION_BTN_WIDTH}`}
-        >
-          {loading ? "Searching…" : "Search"}
-        </button>
+    <section className='discover-panel'>
+      <div className='panel-heading'>
+        <div>
+          <h2>Find your next favorite</h2>
+          <p>Search YouTube. Set the mood.</p>
+        </div>
       </div>
-
-      {error && <div className="text-red-400 text-sm bg-red-900/20 border border-red-700/30 rounded-lg p-2">{error}</div>}
-
+      <form
+        className='search-form'
+        onSubmit={(event) => {
+          event.preventDefault()
+          void search()
+        }}
+      >
+        <Input
+          type='search'
+          aria-label='Search YouTube'
+          placeholder='Song, artist, or a little inspiration…'
+          value={q}
+          onChange={(event) => setQ(event.target.value)}
+        />
+        <Button
+          className='room-primary'
+          disabled={loading || !q.trim()}
+          type='submit'
+          aria-label={loading ? "Searching" : "Search"}
+        >
+          {loading ? <Loader2 className='spin' /> : <Search />}
+        </Button>
+      </form>
+      {loading && (
+        <div className='panel-empty' role='status'>
+          <Loader2 className='spin' />
+          <strong>Finding your soundtrack…</strong>
+          <p>Some sources take a moment to respond.</p>
+        </div>
+      )}
+      {error && (
+        <p className='search-error' role='alert'>
+          {error}
+        </p>
+      )}
+      {!searched && (
+        <div className='panel-empty'>
+          <Headphones />
+          <strong>What are we listening to?</strong>
+          <p>Find a favorite, add it to the queue, and share the moment.</p>
+        </div>
+      )}
       {results.length > 0 && (
-        <div className="space-y-2">
-          {/* Close button for results */}
-          <div className="flex justify-between items-center">
-            <span className="text-sm text-dark-400">{results.length} results</span>
+        <>
+          <div className='search-status'>
+            <span>{results.length} results</span>
             <button
-              onClick={closeResults}
-              className="text-sm text-dark-400 hover:text-dark-200 underline"
-              title="Close search results"
+              onClick={() => {
+                request.current++
+                setResults([])
+                setSearched(false)
+                setError(null)
+                setLoading(false)
+              }}
             >
-              Close
+              Clear
             </button>
           </div>
-          
-          <div className="grid gap-2 max-h-96 overflow-y-auto">
-            {results.map((r) => (
-              <div
-                key={r.id}
-                className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 p-3 rounded-lg border border-dark-700/50 bg-dark-800/50 hover:bg-dark-800 transition-all duration-200"
-              >
-                {/* Thumb */}
-                {r.thumbnails?.[0]?.url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={r.thumbnails[0].url} alt="" className="w-20 h-12 object-cover rounded-md border border-dark-700/30" />
+          <div className='search-results'>
+            {results.map((result) => (
+              <div key={result.id} className='search-result'>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                {result.thumbnails?.[0]?.url ? (
+                  <Image
+                    width={54}
+                    height={54}
+                    unoptimized
+                    className='search-thumb'
+                    src={result.thumbnails[0].url}
+                    alt=''
+                    loading='lazy'
+                  />
                 ) : (
-                  <div className="w-20 h-12 bg-dark-700 rounded-md border border-dark-700/30" />
+                  <span className='search-thumb' />
                 )}
-
-                {/* Info */}
-                <div className="min-w-0">
-                  <div className="truncate font-medium text-dark-200">{r.title}</div>
-                  <div className="text-dark-500 text-xs truncate">{r.url}</div>
+                <div>
+                  <h3>{result.title}</h3>
+                  <p>
+                    YouTube
+                    {result.duration
+                      ? ` · ${secondsToTime(result.duration)}`
+                      : ""}
+                  </p>
                 </div>
-
-                {/* Add (small) */}
-                <button
-                  className={`btn bg-accent-600 hover:bg-accent-700 active:bg-accent-800 px-3 py-1.5 rounded-lg text-xs justify-center font-medium transition-all duration-200 ${ADD_BTN_WIDTH}`}
-                  onClick={() => addToPlaylist(r.url)}
-                  title="Add to playlist"
-                >
-                  Add
-                </button>
-
-                {/* Play (aligned under Search button) */}
-                <button
-                  className={`btn bg-primary-600 hover:bg-primary-700 active:bg-primary-800 px-3 py-1.5 rounded-lg justify-center font-medium transition-all duration-200 shadow-md hover:shadow-glow ${ACTION_BTN_WIDTH}`}
-                  onClick={() => playNow(r.url)}
-                  title="Play now"
-                >
-                  Play
-                </button>
+                <div className='search-result-actions'>
+                  <button
+                    aria-label={
+                      added.includes(result.id)
+                        ? `${result.title} added`
+                        : `Add ${result.title} to queue`
+                    }
+                    title={
+                      added.includes(result.id)
+                        ? "Added to queue"
+                        : "Add to queue"
+                    }
+                    disabled={!socket?.connected || added.includes(result.id)}
+                    onClick={() => {
+                      socket?.emit("addToPlaylist", result.url, {
+                        title: result.title,
+                        thumbnail: result.thumbnails?.[0]?.url,
+                      })
+                      setAdded((previous) => [...previous, result.id])
+                    }}
+                  >
+                    {added.includes(result.id) ? (
+                      <Check size={17} />
+                    ) : (
+                      <Plus size={17} />
+                    )}
+                  </button>
+                  <button
+                    aria-label={`Play ${result.title}`}
+                    title='Play now'
+                    disabled={!socket?.connected}
+                    onClick={() =>
+                      socket?.emit("playUrl", result.url, {
+                        title: result.title,
+                        thumbnail: result.thumbnails?.[0]?.url,
+                      })
+                    }
+                  >
+                    <Play size={16} fill='currentColor' />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
-        </div>
+        </>
       )}
-    </div>
+    </section>
   )
 }
-
 export default YoutubeSearch

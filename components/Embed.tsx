@@ -1,71 +1,27 @@
 "use client"
-import { FC, useEffect, useState } from "react"
+import { useEffect, useState } from "react"
 import Player from "./player/Player"
-import {
-  ClientToServerEvents,
-  createClientSocket,
-  ServerToClientEvents,
-} from "../lib/socket"
-import { Socket } from "socket.io-client"
-import ConnectingAlert from "./alert/ConnectingAlert"
+import { useRoomSocket } from "../hooks/useRoomSocket"
 
-interface Props {
-  id: string
-}
-
-let connecting = false
-
-const Embed: FC<Props> = ({ id }) => {
-  const [connected, setConnected] = useState(false)
-  const [socket, setSocket] = useState<Socket<
-    ServerToClientEvents,
-    ClientToServerEvents
-  > | null>(null)
-
+export default function Embed({ id }: { id: string }) {
+  const [name, setName] = useState<string | null>(null)
   useEffect(() => {
-    fetch("/api/socketio").finally(() => {
-      if (socket !== null) {
-        setConnected(socket.connected)
-      } else {
-        const newSocket = createClientSocket(id)
-        newSocket.on("connect", () => {
-          setConnected(true)
-        })
-        setSocket(newSocket)
-      }
-    })
-
-    return () => {
-      if (socket !== null) {
-        socket.disconnect()
-      }
+    try {
+      setName(localStorage.getItem("userName") || "")
+    } catch {
+      setName("")
     }
-  }, [id, socket])
-
-  const connectionCheck = () => {
-    if (socket !== null && socket.connected) {
-      connecting = false
-      setConnected(true)
-      return
-    }
-    setTimeout(connectionCheck, 100)
-  }
-
-  if (!connected || socket === null) {
-    if (!connecting) {
-      connecting = true
-      connectionCheck()
-    }
+  }, [])
+  const { socket, error, retry } = useRoomSocket(id, name)
+  if (!socket)
     return (
-      <div className={"flex justify-center"}>
-        <ConnectingAlert />
+      <div className='embed-loading' role='status'>
+        {error ? (
+          <button onClick={retry}>Connection failed. Try again</button>
+        ) : (
+          "Joining the stream…"
+        )}
       </div>
     )
-  }
-
-  return (
-      <Player roomId={id} socket={socket}  fullHeight={true}/>
-  )
+  return <Player roomId={id} socket={socket} fullHeight />
 }
-
-export default Embed
