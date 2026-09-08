@@ -2336,3 +2336,112 @@
 .player-welcome .music-caption h2 {
   font-size: clamp(1.3rem, 2.5vw, 2rem);
 }
+
+/* Mini view moves the existing player instead of starting another stream. */
+.player-dock-placeholder {
+  aspect-ratio: 16 / 9;
+  min-height: 320px;
+}
+.player-stage.player-docked {
+  position: fixed;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  right: 16px;
+  width: min(390px, calc(100vw - 32px));
+  height: auto;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  border: 1px solid #394246;
+  border-radius: 16px;
+  box-shadow: 0 12px 48px #0009;
+  z-index: 55;
+}
+.player-dock-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 16px;
+  background: #101518;
+}
+.player-dock-header > span {
+  flex: 1;
+  font-size: 0.875rem;
+}
+.player-docked .player-viewport {
+  flex: none;
+  min-height: 200px;
+  aspect-ratio: 16 / 9;
+  border-radius: 0;
+}
+.player-docked .player-control-deck {
+  padding: 10px 12px 12px;
+}
+.player-docked .transport-primary,
+.player-docked .transport-secondary {
+  gap: 0;
+}
+.player-docked .player-transport {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.player-docked .player-volume {
+  margin-left: 0;
+}
+.player-docked .player-volume input,
+.player-docked .player-repeat,
+.player-docked .player-audio,
+.player-docked .player-pip {
+  display: none !important;
+}
+.player-docked .music-canvas {
+  min-height: 200px;
+  padding: 16px;
+  gap: 16px;
+  flex-direction: row;
+  text-align: left;
+}
+.player-docked .music-artwork {
+  width: 80px;
+}
+.player-docked .music-caption h2 {
+  font-size: 1rem;
+}
+.player-docked .player-eyebrow {
+  display: none;
+}
+.player-docked .player-settings {
+  position: fixed;
+  bottom: max(80px, env(safe-area-inset-bottom));
+  right: 24px;
+}
+.has-docked-player .sticky-mini {
+  display: none;
+}
+.player-expanded .player-viewport {
+  border-radius: 0;
+}
+@media (orientation: landscape) and (max-height: 550px) {
+  .player-expanded .player-control-deck {
+    padding: 4px max(14px, env(safe-area-inset-right))
+      max(4px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+  }
+  .player-expanded .player-deck-heading {
+    float: right;
+    gap: 16px;
+    margin-top: 10px;
+  }
+  .player-expanded .player-timeline {
+    margin-bottom: 0;
+  }
+  .player-expanded .player-timeline input {
+    height: 18px;
+  }
+  .player-expanded .player-volume input {
+    display: none;
+  }
+  .player-expanded .player-mode {
+    display: none;
+  }
+  .player-expanded .player-transport {
+    padding-right: 125px;
+  }
+}

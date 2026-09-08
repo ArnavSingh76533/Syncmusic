@@ -36,8 +36,40 @@ export function playbackCorrection({
     : null
 }
 
-// Keep the existing media element alive. Visibility changes are not pause
-// commands, and foreground recovery must use the latest shared play intent.
+export interface PlaybackProvider {
+  playVideo?: () => void
+  play?: () => Promise<void> | void
+  getPlayerState?: () => number
+  paused?: boolean
+  ended?: boolean
+}
+
+// Use the provider's own playback command, as the original player did.
+// YouTube's public API is playVideo; a generic play property is not its API.
+export function resumeProvider(
+  provider: PlaybackProvider | null | undefined,
+  blocked: () => void
+) {
+  if (!provider || provider.ended) return
+  try {
+    if (typeof provider.playVideo === "function") provider.playVideo()
+    else provider.play?.()?.catch(blocked)
+  } catch {
+    blocked()
+  }
+}
+
+export function providerIsPlaying(
+  provider: PlaybackProvider | null | undefined
+) {
+  if (!provider) return false
+  if (typeof provider.getPlayerState === "function")
+    return provider.getPlayerState() === 1
+  return provider.paused === false && !provider.ended
+}
+
+// A hide event must not send another play command to an already playing iframe.
+// Let playback continue untouched; recover real provider pauses via onPause.
 export function bindPlaybackLifecycle(
   page: EventTarget & { visibilityState: string },
   windowEvents: EventTarget,
@@ -48,7 +80,8 @@ export function bindPlaybackLifecycle(
   }
 ) {
   const recover = () => {
-    if (page.visibilityState === "visible") callbacks.refresh()
+    if (page.visibilityState !== "visible") return
+    callbacks.refresh()
     if (callbacks.shouldPlay()) callbacks.resume()
   }
   page.addEventListener("visibilitychange", recover)

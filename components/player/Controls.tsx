@@ -30,6 +30,8 @@ interface Props {
   currentSub: Subtitle
   setCurrentSub: (value: Subtitle) => void
   paused: boolean
+  interrupted: boolean
+  resumePlayback: () => void
   setPaused: (value: boolean) => void
   muted: boolean
   setMuted: (value: boolean) => void
@@ -107,6 +109,10 @@ export default function Controls(props: Props) {
     setSeeking(false)
   }, [props.currentSrc.src, canControl, setSeeking]) // release a seek if the host or source changes
   const togglePlay = () => {
+    if (props.interrupted && !paused) {
+      props.resumePlayback()
+      return
+    }
     if (canControl && hasMedia) {
       if (ended) playAgain()
       else setPaused(!paused)
@@ -235,16 +241,22 @@ export default function Controls(props: Props) {
               "player-skip"
             )}
             {iconButton(
-              ended ? "Replay" : paused ? "Play" : "Pause",
+              ended
+                ? "Replay"
+                : props.interrupted
+                  ? "Resume playback"
+                  : paused
+                    ? "Play"
+                    : "Pause",
               togglePlay,
               ended ? (
                 <RotateCcw />
-              ) : paused ? (
+              ) : paused || props.interrupted ? (
                 <Play fill='currentColor' />
               ) : (
                 <Pause fill='currentColor' />
               ),
-              !canControl || !hasMedia,
+              (!canControl && !props.interrupted) || !hasMedia,
               false,
               "transport-play"
             )}
@@ -302,7 +314,7 @@ export default function Controls(props: Props) {
               "player-audio"
             )}
             {iconButton(
-              pipEnabled ? "Close picture-in-picture" : "Open mini player",
+              pipEnabled ? "Close mini player" : "Open mini player",
               togglePip,
               <PictureInPicture2 />,
               !hasMedia,
@@ -429,13 +441,14 @@ export default function Controls(props: Props) {
                   )}
                   <button
                     className='settings-mini-link'
-                    onClick={togglePip}
+                    onClick={() => {
+                      setSettings(false)
+                      void togglePip()
+                    }}
                     disabled={!hasMedia}
                   >
                     <PictureInPicture2 size={15} />
-                    {pipEnabled
-                      ? "Close picture-in-picture"
-                      : "Picture-in-picture"}
+                    {pipEnabled ? "Close mini player" : "Mini player"}
                   </button>
                   <a
                     className='settings-mini-link'

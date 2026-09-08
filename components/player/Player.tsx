@@ -18,15 +18,23 @@ import {
   Play,
   Pause,
   ChevronUp,
+  X,
+  Maximize2,
 } from "lucide-react"
 import { TypedSocket, playItemFromPlaylist } from "../../lib/socket"
 import { MediaOption, RoomState, Subtitle, TargetState } from "../../lib/types"
-import { bindPlaybackLifecycle, playbackCorrection } from "../../lib/playback"
+import {
+  bindPlaybackLifecycle,
+  playbackCorrection,
+  resumeProvider,
+  providerIsPlaying,
+} from "../../lib/playback"
 import {
   mediaArtwork,
   mediaProvider,
   mediaTitle,
   isImageSource,
+  youtubeId,
 } from "../../lib/media"
 import { getDefaultImg } from "../../lib/env"
 import { Button } from "../ui/button"
@@ -79,6 +87,8 @@ export default function Player({
   const [autoplayBlocked, setAutoplayBlocked] = useState(false)
   const [reload, setReload] = useState(0)
   const [pip, setPip] = useState(false)
+  const [docked, setDocked] = useState(false)
+  const [actuallyPlaying, setActuallyPlaying] = useState(false)
   const [theater, setTheater] = useState(false)
   const [showMini, setShowMini] = useState(false)
   const player = useRef<ReactPlayer>(null)
@@ -103,6 +113,11 @@ export default function Player({
   const artwork = mediaArtwork(target.playing)
   const title = mediaTitle(target.playing)
   const canControl = owner && connected
+  const youtubeSource = !!youtubeId(currentSrc.src)
+  const ownsMediaSession = !!currentSrc.src && !imageSource && !youtubeSource
+  const interrupted =
+    !target.paused &&
+    (autoplayBlocked || (!actuallyPlaying && !buffering && ready))
 
   useEffect(() => {
     const onConnect = () => {
@@ -159,6 +174,7 @@ export default function Player({
 
   useEffect(() => {
     setReady(false)
+    setActuallyPlaying(false)
     setBuffering(!!currentSrc.src && !imageSource)
     setError(null)
   }, [currentSrc.src, imageSource, reload])
@@ -181,22 +197,22 @@ export default function Player({
   }, [ready, progress, target, duration, imageSource, owner, buffering])
 
   const resumePlayback = useCallback(() => {
-    if (targetRef.current.paused || seeking.current) return
-    const internal = player.current?.getInternalPlayer()
-    try {
-      if (typeof internal?.play === "function") {
-        internal.play()?.catch?.(() => setAutoplayBlocked(true))
-      } else internal?.playVideo?.()
-    } catch {
+    if (targetRef.current.paused) return
+    // A pointer gesture interrupted by an app switch must not disable recovery.
+    if (seeking.current && document.visibilityState === "visible") return
+    resumeProvider(player.current?.getInternalPlayer(), () =>
       setAutoplayBlocked(true)
-    }
+    )
   }, [])
 
   useEffect(
     () =>
       bindPlaybackLifecycle(document, window, {
         shouldPlay: () => !targetRef.current.paused,
-        resume: resumePlayback,
+        resume: () => {
+          if (!providerIsPlaying(player.current?.getInternalPlayer()))
+            resumePlayback()
+        },
         refresh: () => {
           if (socket.connected) socket.emit("fetch")
           else socket.connect()
@@ -217,9 +233,13 @@ export default function Player({
 
   useEffect(() => () => blockedCleanup.current?.(), [])
 
-  // Lock-screen and headset controls use the same room commands as the UI.
+  // Native files belong to this document. YouTube owns its media session inside
+  // its iframe; parent-page handlers must not replace that session.
+
   useEffect(() => {
-    if (!("mediaSession" in navigator) || imageSource || !canonicalSrc) return
+    if (!("mediaSession" in navigator) || !ownsMediaSession || !ready) return
+    if (!(player.current?.getInternalPlayer() instanceof HTMLMediaElement))
+      return
     const session = navigator.mediaSession
     if (typeof MediaMetadata !== "undefined")
       session.metadata = new MediaMetadata({
@@ -305,15 +325,20 @@ export default function Player({
     title,
     artwork,
     roomId,
-    imageSource,
+    ownsMediaSession,
+    ready,
     socket,
     owner,
     resumePlayback,
   ])
 
   useEffect(() => {
-    if (!("mediaSession" in navigator) || imageSource || !canonicalSrc) return
-    navigator.mediaSession.playbackState = target.paused ? "paused" : "playing"
+    if (!("mediaSession" in navigator) || !ownsMediaSession || !ready) return
+    if (!(player.current?.getInternalPlayer() instanceof HTMLMediaElement))
+      return
+    navigator.mediaSession.playbackState = actuallyPlaying
+      ? "playing"
+      : "paused"
     try {
       if (duration > 0)
         navigator.mediaSession.setPositionState?.({
@@ -326,12 +351,13 @@ export default function Player({
       /* position reporting is optional */
     }
   }, [
-    target.paused,
+    actuallyPlaying,
     target.playbackRate,
     progress,
     duration,
     canonicalSrc,
-    imageSource,
+    ownsMediaSession,
+    ready,
   ])
 
   const anchorPlayback = () => {
@@ -380,18 +406,48 @@ export default function Player({
     }
   }, [theater])
 
+  // Restore the original landscape behavior, including Back/Escape cleanup.
+  useEffect(() => {
+    if (!fullscreenHandle.active) return
+    const orientation = screen.orientation as ScreenOrientation & {
+      lock?: (mode: string) => Promise<void>
+    }
+    let cancelled = false
+    let locked = false
+    if (orientation?.lock) {
+      void orientation
+        .lock("landscape")
+        .then(() => {
+          if (cancelled) orientation.unlock()
+          else locked = true
+        })
+        .catch(() => {
+          /* platform doesn't support orientation locking */
+        })
+    }
+    return () => {
+      cancelled = true
+      if (locked) orientation.unlock()
+    }
+  }, [fullscreenHandle.active])
+
   const toggleFullscreen = async () => {
+    setDocked(false)
     try {
       if (theater) setTheater(false)
       else if (fullscreenHandle.active) await fullscreenHandle.exit()
       else await fullscreenHandle.enter()
     } catch {
       setTheater(true)
-    } // iOS without element fullscreen still gets a full-window player.
+    }
   }
 
   const togglePip = async () => {
     const internal = player.current?.getInternalPlayer()
+    if (docked) {
+      setDocked(false)
+      return
+    }
     if (document.pictureInPictureElement) {
       try {
         await document.exitPictureInPicture()
@@ -409,19 +465,14 @@ export default function Player({
       try {
         await internal.requestPictureInPicture()
         setPip(true)
+        return
       } catch {
-        setNotice("Picture-in-picture isn’t available for this video yet.")
+        /* Keep the same player in an in-page mini view instead. */
       }
-      return
     }
-    // YouTube embeds do not support ReactPlayer's native PiP prop.
-    const popup = window.open(
-      `/embed/${encodeURIComponent(roomId)}`,
-      "syncmusic-mini",
-      "width=640,height=400,resizable=yes"
-    )
-    if (popup) popup.focus()
-    else setNotice("Allow pop-ups to open the mini player.")
+    if (fullscreenHandle.active) await fullscreenHandle.exit()
+    setTheater(false)
+    setDocked(true)
   }
 
   const resumeAudio = () => {
@@ -492,17 +543,46 @@ export default function Player({
 
   return (
     <div
-      className={`player-shell ${fullHeight ? "player-embed" : ""}`}
+      className={`player-shell ${fullHeight ? "player-embed" : ""} ${
+        docked ? "has-docked-player" : ""
+      }`}
       ref={container}
     >
+      {docked && <div className='player-dock-placeholder' aria-hidden='true' />}
       <FullScreenContainer
         handle={fullscreenHandle}
         className={`player-stage ${fullscreen ? "player-expanded" : ""} ${
           theater ? "player-theater" : ""
-        } ${musicMode ? "player-music" : ""} ${
+        } ${docked ? "player-docked" : ""} ${musicMode ? "player-music" : ""} ${
           imageSource || !currentSrc.src ? "player-welcome" : ""
         }`}
       >
+        {docked && (
+          <div className='player-dock-header'>
+            <span>Mini player</span>
+            <Button
+              className='player-button'
+              variant='ghost'
+              size='icon'
+              aria-label='Return to full player'
+              onClick={() => {
+                setDocked(false)
+                container.current?.scrollIntoView({ block: "start" })
+              }}
+            >
+              <Maximize2 />
+            </Button>
+            <Button
+              className='player-button'
+              variant='ghost'
+              size='icon'
+              aria-label='Close mini view and keep listening'
+              onClick={() => setDocked(false)}
+            >
+              <X />
+            </Button>
+          </div>
+        )}
         <div className='player-viewport'>
           <div className='player-media'>
             {!imageSource && currentSrc.src ? (
@@ -518,17 +598,20 @@ export default function Player({
                 playbackRate={target.playbackRate}
                 volume={volume}
                 muted={muted}
-                playsinline
+                // Preserve the original YouTube mobile playback mode.
+                playsinline={!youtubeSource}
                 config={{
                   youtube: {
                     playerVars: {
                       disablekb: 1,
-                      autoplay: 1,
                       origin:
                         typeof window !== "undefined"
                           ? window.location.origin
                           : undefined,
-                      rel: 0,
+                      ...(target.playlist.currentIndex >=
+                      target.playlist.items.length - 1
+                        ? { rel: 1 }
+                        : { rel: 0 }),
                     },
                   },
                   file: {
@@ -553,6 +636,8 @@ export default function Player({
                 }}
                 onReady={() => {
                   setReady(true)
+                  const length = player.current?.getDuration()
+                  if (length && Number.isFinite(length)) setDuration(length)
                   setBuffering(false)
                   setError(null)
                   blockedCleanup.current?.()
@@ -570,6 +655,7 @@ export default function Player({
                   socket.emit("fetch")
                 }}
                 onPlay={() => {
+                  setActuallyPlaying(true)
                   setBuffering(false)
                   setAutoplayBlocked(false)
                   const internal = player.current?.getInternalPlayer()
@@ -578,13 +664,17 @@ export default function Player({
                     internal?.pauseVideo?.()
                   } else anchorPlayback()
                 }}
-                onPause={resumePlayback}
+                onPause={() => {
+                  setActuallyPlaying(false)
+                  resumePlayback()
+                }}
                 onBuffer={() => setBuffering(true)}
                 onBufferEnd={() => {
                   setBuffering(false)
                   anchorPlayback()
                 }}
                 onEnded={() => {
+                  setActuallyPlaying(false)
                   if (ownerRef.current) socket.emit("playEnded")
                 }}
                 onError={onPlaybackError}
@@ -592,6 +682,9 @@ export default function Player({
                   if (!Number.isFinite(playedSeconds) || seeking.current) return
                   setReady(true)
                   setProgress(playedSeconds)
+                  const length = player.current?.getDuration()
+                  if (length && Number.isFinite(length) && length !== duration)
+                    setDuration(length)
                   if (Date.now() - anchoredAt.current > 3000) anchorPlayback()
                   if (
                     socket.connected &&
@@ -650,6 +743,8 @@ export default function Player({
           currentSub={currentSub}
           setCurrentSub={setCurrentSub}
           paused={target.paused}
+          interrupted={interrupted}
+          resumePlayback={resumeAudio}
           setPaused={changePaused}
           volume={volume}
           setVolume={setVolume}
@@ -686,7 +781,7 @@ export default function Player({
             if (canControl) socket.emit("playAgain")
           }}
           canControl={canControl}
-          pipEnabled={pip}
+          pipEnabled={pip || docked}
           togglePip={togglePip}
           musicMode={musicMode}
           setMusicMode={(value) => {
@@ -746,6 +841,7 @@ export default function Player({
       {showMini &&
         !fullHeight &&
         !fullscreen &&
+        !docked &&
         canonicalSrc &&
         !imageSource && (
           <div
@@ -781,11 +877,19 @@ export default function Player({
             <Button
               className='player-button transport-play'
               size='icon'
-              disabled={!canControl}
-              aria-label={target.paused ? "Play" : "Pause"}
-              onClick={() => changePaused(!target.paused)}
+              disabled={!canControl && !interrupted}
+              aria-label={
+                interrupted
+                  ? "Resume playback"
+                  : target.paused
+                    ? "Play"
+                    : "Pause"
+              }
+              onClick={() =>
+                interrupted ? resumeAudio() : changePaused(!target.paused)
+              }
             >
-              {target.paused ? (
+              {target.paused || interrupted ? (
                 <Play fill='currentColor' />
               ) : (
                 <Pause fill='currentColor' />
