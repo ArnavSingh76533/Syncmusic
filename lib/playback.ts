@@ -69,20 +69,17 @@ export function providerIsPlaying(
 }
 
 // A hide event must not send another play command to an already playing iframe.
-// Let playback continue untouched; recover real provider pauses via onPause.
+// Refresh room state on return without issuing provider playback commands.
 export function bindPlaybackLifecycle(
   page: EventTarget & { visibilityState: string },
   windowEvents: EventTarget,
   callbacks: {
     refresh: () => void
-    resume: () => void
-    shouldPlay: () => boolean
   }
 ) {
   const recover = () => {
     if (page.visibilityState !== "visible") return
     callbacks.refresh()
-    if (callbacks.shouldPlay()) callbacks.resume()
   }
   page.addEventListener("visibilitychange", recover)
   windowEvents.addEventListener("pageshow", recover)

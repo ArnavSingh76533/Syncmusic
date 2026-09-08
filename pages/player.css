@@ -492,15 +492,8 @@
   overflow: visible;
 }
 .player-media {
-  position: absolute;
-  inset: 0;
+  position: relative;
 }
-/* ReactPlayer owns its dimensions, including streamer3's 1px audio mode. */
-.player-music .player-media {
-  pointer-events: none;
-}
-.player-media video,
-.player-media iframe,
 .welcome-image {
   width: 100%;
   height: 100%;
@@ -1649,10 +1642,10 @@
 .player-viewport {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: auto;
   min-height: 200px;
   flex-shrink: 0;
-  overflow: hidden;
+  overflow: auto;
   border-radius: inherit;
   border-bottom-left-radius: 0;
   border-bottom-right-radius: 0;

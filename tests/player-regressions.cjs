@@ -66,11 +66,11 @@ function unitTests() {
   assert.equal(refreshes, 0, "hiding the page must not reset or fetch the player")
   page.visibilityState = "visible"
   page.dispatchEvent(new Event("visibilitychange"))
-  assert.equal(resumes, 1)
+  assert.equal(resumes, 0)
   assert.equal(refreshes, 1)
   shouldPlay = false
   windowEvents.dispatchEvent(new Event("pageshow"))
-  assert.equal(resumes, 1, "returning to a paused room must not restart playback")
+  assert.equal(resumes, 0, "returning to a paused room must not restart playback")
   assert.equal(refreshes, 2)
   unbind()
   windowEvents.dispatchEvent(new Event("online"))

@@ -18,8 +18,6 @@ import {
   Play,
   Pause,
   ChevronUp,
-  X,
-  Maximize2,
 } from "lucide-react"
 import { TypedSocket, playItemFromPlaylist } from "../../lib/socket"
 import { MediaOption, RoomState, Subtitle, TargetState } from "../../lib/types"
@@ -27,7 +25,6 @@ import {
   bindPlaybackLifecycle,
   playbackCorrection,
   resumeProvider,
-  providerIsPlaying,
 } from "../../lib/playback"
 import {
   mediaArtwork,
@@ -75,7 +72,6 @@ export default function Player({
   const [owner, setOwner] = useState(false)
   const ownerRef = useRef(false)
   const [connected, setConnected] = useState(socket.connected)
-  const [musicMode, setMusicMode] = useState(false)
   const [muted, setMuted] = useState(true)
   const [volume, setVolume] = useState(1)
   const [progress, setProgress] = useState(0)
@@ -87,9 +83,7 @@ export default function Player({
   const [autoplayBlocked, setAutoplayBlocked] = useState(false)
   const [reload, setReload] = useState(0)
   const [pip, setPip] = useState(false)
-  const [docked, setDocked] = useState(false)
   const [actuallyPlaying, setActuallyPlaying] = useState(false)
-  const [theater, setTheater] = useState(false)
   const [showMini, setShowMini] = useState(false)
   const player = useRef<ReactPlayer>(null)
   const container = useRef<HTMLDivElement>(null)
@@ -105,7 +99,7 @@ export default function Player({
   const recovery = useRef<AbortController | null>(null)
   const triedFallback = useRef(false)
   const fullscreenHandle = useFullScreenHandle()
-  const fullscreen = fullscreenHandle.active || theater
+  const fullscreen = fullscreenHandle.active
   const canonicalSrc = target.playing.src?.[0]?.src || ""
   const imageSource =
     isImageSource(currentSrc.src) ||
@@ -131,7 +125,6 @@ export default function Player({
         delta.current = (room.serverTime - Date.now()) / 1000
       ownerRef.current = room.ownerId === socket.id
       setOwner(ownerRef.current)
-      // streamer3 keeps audio/video presentation local to each listener.
       targetRef.current = room.targetState
       setTarget((previous) =>
         JSON.stringify(previous) === JSON.stringify(room.targetState)
@@ -198,8 +191,7 @@ export default function Player({
 
   const resumePlayback = useCallback(() => {
     if (targetRef.current.paused) return
-    // Match streamer3's onPause recovery: only an explicit room pause stops
-    // playback, even if a provider pause arrives during a seek or app switch.
+    // Explicit user actions may resume the provider; browser events do not.
     resumeProvider(player.current?.getInternalPlayer(), () =>
       setAutoplayBlocked(true)
     )
@@ -208,17 +200,12 @@ export default function Player({
   useEffect(
     () =>
       bindPlaybackLifecycle(document, window, {
-        shouldPlay: () => !targetRef.current.paused,
-        resume: () => {
-          if (!providerIsPlaying(player.current?.getInternalPlayer()))
-            resumePlayback()
-        },
         refresh: () => {
           if (socket.connected) socket.emit("fetch")
           else socket.connect()
         },
       }),
-    [socket, resumePlayback]
+    [socket]
   )
 
   useEffect(() => {
@@ -392,106 +379,36 @@ export default function Player({
     )
   }
 
-  useEffect(() => {
-    if (!theater) return
-    const previous = document.body.style.overflow
-    document.body.style.overflow = "hidden"
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setTheater(false)
-    }
-    document.addEventListener("keydown", escape)
-    return () => {
-      document.body.style.overflow = previous
-      document.removeEventListener("keydown", escape)
-    }
-  }, [theater])
-
-  // Restore the original landscape behavior, including Back/Escape cleanup.
-  useEffect(() => {
-    if (!fullscreenHandle.active) return
-    const orientation = screen.orientation as ScreenOrientation & {
-      lock?: (mode: string) => Promise<void>
-    }
-    let cancelled = false
-    let locked = false
-    if (orientation?.lock) {
-      void orientation
-        .lock("landscape")
-        .then(() => {
-          if (cancelled) orientation.unlock()
-          else locked = true
-        })
-        .catch(() => {
-          /* platform doesn't support orientation locking */
-        })
-    }
-    return () => {
-      cancelled = true
-      if (locked) orientation.unlock()
-    }
-  }, [fullscreenHandle.active])
-
   const toggleFullscreen = async () => {
-    setDocked(false)
     try {
-      if (theater) setTheater(false)
-      else if (fullscreenHandle.active) await fullscreenHandle.exit()
+      if (fullscreenHandle.active) await fullscreenHandle.exit()
       else await fullscreenHandle.enter()
     } catch {
-      setTheater(true)
+      setNotice("Fullscreen is unavailable in this browser.")
     }
   }
 
   const togglePip = async () => {
-    const internal = player.current?.getInternalPlayer()
-    if (docked) {
-      setDocked(false)
-      return
-    }
-    if (document.pictureInPictureElement) {
-      try {
+    try {
+      if (document.pictureInPictureElement) {
         await document.exitPictureInPicture()
         setPip(false)
-      } catch {
-        setNotice("Couldn’t close the floating player. Use its close button.")
+        return
       }
-      return
-    }
-    setMusicMode(false)
-    if (
-      internal instanceof HTMLVideoElement &&
-      document.pictureInPictureEnabled &&
-      !internal.disablePictureInPicture
-    ) {
-      try {
+      const internal = player.current?.getInternalPlayer()
+      if (
+        internal instanceof HTMLVideoElement &&
+        document.pictureInPictureEnabled &&
+        !internal.disablePictureInPicture
+      ) {
         await internal.requestPictureInPicture()
         setPip(true)
-        return
-      } catch {
-        /* Keep the same player in an in-page mini view instead. */
+      } else {
+        setNotice("Picture-in-picture is unavailable for this player. Use your browser’s video controls if available.")
       }
+    } catch {
+      setNotice("Picture-in-picture is unavailable in this browser.")
     }
-    if (fullscreenHandle.active) await fullscreenHandle.exit()
-    setTheater(false)
-    setDocked(true)
-  }
-
-  const changeMusicMode = async (value: boolean) => {
-    // As in streamer3, audio mode and the floating video are alternatives.
-    // Keep the existing media instance and its current playhead in both modes.
-    if (value && document.pictureInPictureElement) {
-      try {
-        await document.exitPictureInPicture()
-      } catch {
-        setNotice("Close the floating video before switching to audio mode.")
-        return
-      }
-    }
-    if (value) {
-      setPip(false)
-      setDocked(false)
-    }
-    setMusicMode(value)
   }
 
   const resumeAudio = () => {
@@ -562,62 +479,23 @@ export default function Player({
 
   return (
     <div
-      className={`player-shell ${fullHeight ? "player-embed" : ""} ${
-        docked ? "has-docked-player" : ""
-      }`}
+      className={`player-shell ${fullHeight ? "player-embed" : ""}`}
       ref={container}
     >
-      {docked && <div className='player-dock-placeholder' aria-hidden='true' />}
       <FullScreenContainer
         handle={fullscreenHandle}
         className={`player-stage ${fullscreen ? "player-expanded" : ""} ${
-          theater ? "player-theater" : ""
-        } ${docked ? "player-docked" : ""} ${musicMode ? "player-music" : ""} ${
           imageSource || !currentSrc.src ? "player-welcome" : ""
         }`}
       >
-        {docked && (
-          <div className='player-dock-header'>
-            <span>Mini player</span>
-            <Button
-              className='player-button'
-              variant='ghost'
-              size='icon'
-              aria-label='Return to full player'
-              onClick={() => {
-                setDocked(false)
-                container.current?.scrollIntoView({ block: "start" })
-              }}
-            >
-              <Maximize2 />
-            </Button>
-            <Button
-              className='player-button'
-              variant='ghost'
-              size='icon'
-              aria-label='Close mini view and keep listening'
-              onClick={() => setDocked(false)}
-            >
-              <X />
-            </Button>
-          </div>
-        )}
         <div className='player-viewport'>
           <div className='player-media'>
             {!imageSource && currentSrc.src ? (
               <ReactPlayer
                 key={reload}
                 ref={player}
-                // Playback presentation adapted from streamer3's Player.tsx
-                // at 65d42ee970bb75efb1cdd484c3839c3f837022f6.
-                // Keep the provider mounted and rendered in audio mode.
-                width={musicMode ? "1px" : "100%"}
-                height={musicMode ? "1px" : "100%"}
-                style={{
-                  position: musicMode ? "absolute" : "relative",
-                  opacity: musicMode ? 0 : 1,
-                  pointerEvents: musicMode ? "none" : "auto",
-                }}
+                // Use the provider wrapper's default dimensions in every layout.
+                // Do not hide, resize, or recreate it when controls reflow.
                 url={currentSrc.src}
                 pip={pip}
                 playing={!target.paused}
@@ -625,12 +503,9 @@ export default function Player({
                 playbackRate={target.playbackRate}
                 volume={volume}
                 muted={muted}
-                // Preserve the original YouTube mobile playback mode.
-                playsinline={!youtubeSource}
                 config={{
                   youtube: {
                     playerVars: {
-                      disablekb: 1,
                       origin:
                         typeof window !== "undefined"
                           ? window.location.origin
@@ -693,7 +568,6 @@ export default function Player({
                 }}
                 onPause={() => {
                   setActuallyPlaying(false)
-                  resumePlayback()
                 }}
                 onBuffer={() => setBuffering(true)}
                 onBufferEnd={() => {
@@ -729,7 +603,7 @@ export default function Player({
               />
             ) : null}
           </div>
-          {(musicMode || !currentSrc.src || imageSource) && (
+          {(!currentSrc.src || imageSource) && (
             <div className='music-canvas'>
               <div className='music-artwork'>
                 {artwork ? (
@@ -808,10 +682,8 @@ export default function Player({
             if (canControl) socket.emit("playAgain")
           }}
           canControl={canControl}
-          pipEnabled={pip || docked}
+          pipEnabled={pip}
           togglePip={togglePip}
-          musicMode={musicMode}
-          setMusicMode={changeMusicMode}
           hasMedia={!!currentSrc.src && !imageSource}
         />
         <div className='player-status'>
@@ -866,7 +738,6 @@ export default function Player({
       {showMini &&
         !fullHeight &&
         !fullscreen &&
-        !docked &&
         canonicalSrc &&
         !imageSource && (
           <div

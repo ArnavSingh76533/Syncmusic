@@ -52,8 +52,6 @@ interface Props {
   canControl: boolean
   pipEnabled: boolean
   togglePip: () => void
-  musicMode: boolean
-  setMusicMode: (value: boolean) => void
   hasMedia: boolean
 }
 
@@ -80,8 +78,6 @@ export default function Controls(props: Props) {
     canControl,
     pipEnabled,
     togglePip,
-    musicMode,
-    setMusicMode,
     hasMedia,
   } = props
   const [settings, setSettings] = useState(false)
@@ -179,7 +175,7 @@ export default function Controls(props: Props) {
         <div className='player-deck-heading'>
           <span className='player-mode'>
             <AudioLines size={15} />
-            {musicMode ? "AUDIO SESSION" : "WATCH TOGETHER"}
+            WATCH TOGETHER
           </span>
           <span className='player-time'>
             {secondsToTime(shownProgress)}
@@ -306,15 +302,7 @@ export default function Controls(props: Props) {
               "player-repeat"
             )}
             {iconButton(
-              musicMode ? "Switch to video" : "Switch to audio mode",
-              () => setMusicMode(!musicMode),
-              <AudioLines />,
-              !hasMedia,
-              musicMode,
-              "player-audio"
-            )}
-            {iconButton(
-              pipEnabled ? "Close mini player" : "Open mini player",
+              pipEnabled ? "Exit picture-in-picture" : "Picture-in-picture",
               togglePip,
               <PictureInPicture2 />,
               !hasMedia,
@@ -386,15 +374,6 @@ export default function Controls(props: Props) {
                       disabled={!canControl || !hasMedia}
                     />
                   </label>
-                  <label className='settings-row'>
-                    <span>Audio mode</span>
-                    <Switch
-                      aria-label='Audio mode'
-                      checked={musicMode}
-                      onCheckedChange={setMusicMode}
-                      disabled={!hasMedia}
-                    />
-                  </label>
                   {playing.src.length > 1 && (
                     <label className='settings-row'>
                       <span>Quality</span>
@@ -448,7 +427,7 @@ export default function Controls(props: Props) {
                     disabled={!hasMedia}
                   >
                     <PictureInPicture2 size={15} />
-                    {pipEnabled ? "Close mini player" : "Mini player"}
+                    {pipEnabled ? "Exit picture-in-picture" : "Mini player"}
                   </button>
                   <a
                     className='settings-mini-link'
