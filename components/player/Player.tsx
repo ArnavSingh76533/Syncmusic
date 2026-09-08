@@ -131,7 +131,7 @@ export default function Player({
         delta.current = (room.serverTime - Date.now()) / 1000
       ownerRef.current = room.ownerId === socket.id
       setOwner(ownerRef.current)
-      setMusicMode(!!room.musicMode)
+      // streamer3 keeps audio/video presentation local to each listener.
       targetRef.current = room.targetState
       setTarget((previous) =>
         JSON.stringify(previous) === JSON.stringify(room.targetState)
@@ -198,8 +198,8 @@ export default function Player({
 
   const resumePlayback = useCallback(() => {
     if (targetRef.current.paused) return
-    // A pointer gesture interrupted by an app switch must not disable recovery.
-    if (seeking.current && document.visibilityState === "visible") return
+    // Match streamer3's onPause recovery: only an explicit room pause stops
+    // playback, even if a provider pause arrives during a seek or app switch.
     resumeProvider(player.current?.getInternalPlayer(), () =>
       setAutoplayBlocked(true)
     )
@@ -457,6 +457,7 @@ export default function Player({
       }
       return
     }
+    setMusicMode(false)
     if (
       internal instanceof HTMLVideoElement &&
       document.pictureInPictureEnabled &&
@@ -473,6 +474,24 @@ export default function Player({
     if (fullscreenHandle.active) await fullscreenHandle.exit()
     setTheater(false)
     setDocked(true)
+  }
+
+  const changeMusicMode = async (value: boolean) => {
+    // As in streamer3, audio mode and the floating video are alternatives.
+    // Keep the existing media instance and its current playhead in both modes.
+    if (value && document.pictureInPictureElement) {
+      try {
+        await document.exitPictureInPicture()
+      } catch {
+        setNotice("Close the floating video before switching to audio mode.")
+        return
+      }
+    }
+    if (value) {
+      setPip(false)
+      setDocked(false)
+    }
+    setMusicMode(value)
   }
 
   const resumeAudio = () => {
@@ -589,10 +608,18 @@ export default function Player({
               <ReactPlayer
                 key={reload}
                 ref={player}
-                width='100%'
-                height='100%'
-                style={{ visibility: musicMode ? "hidden" : "visible" }}
+                // Playback presentation adapted from streamer3's Player.tsx
+                // at 65d42ee970bb75efb1cdd484c3839c3f837022f6.
+                // Keep the provider mounted and rendered in audio mode.
+                width={musicMode ? "1px" : "100%"}
+                height={musicMode ? "1px" : "100%"}
+                style={{
+                  position: musicMode ? "absolute" : "relative",
+                  opacity: musicMode ? 0 : 1,
+                  pointerEvents: musicMode ? "none" : "auto",
+                }}
                 url={currentSrc.src}
+                pip={pip}
                 playing={!target.paused}
                 controls={false}
                 playbackRate={target.playbackRate}
@@ -784,9 +811,7 @@ export default function Player({
           pipEnabled={pip || docked}
           togglePip={togglePip}
           musicMode={musicMode}
-          setMusicMode={(value) => {
-            if (canControl) socket.emit("setMusicMode", value)
-          }}
+          setMusicMode={changeMusicMode}
           hasMedia={!!currentSrc.src && !imageSource}
         />
         <div className='player-status'>

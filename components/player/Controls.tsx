@@ -309,7 +309,7 @@ export default function Controls(props: Props) {
               musicMode ? "Switch to video" : "Switch to audio mode",
               () => setMusicMode(!musicMode),
               <AudioLines />,
-              !canControl || !hasMedia,
+              !hasMedia,
               musicMode,
               "player-audio"
             )}
@@ -392,7 +392,7 @@ export default function Controls(props: Props) {
                       aria-label='Audio mode'
                       checked={musicMode}
                       onCheckedChange={setMusicMode}
-                      disabled={!canControl || !hasMedia}
+                      disabled={!hasMedia}
                     />
                   </label>
                   {playing.src.length > 1 && (
